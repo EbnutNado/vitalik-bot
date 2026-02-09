@@ -23,8 +23,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import aiosqlite
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4")  # Берем из переменных окружения
-ADMIN_ID = int(os.getenv("ADMIN_ID", 5775839902))  # Ваш Telegram ID
+BOT_TOKEN = os.getenv("8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4", "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4")  # Берем из переменных окружения
+ADMIN_ID = int(os.getenv("5775839902", 5775839902))  # Ваш Telegram ID
 
 # Настройка логирования
 logging.basicConfig(
