@@ -1,16 +1,19 @@
 """
 Telegram бот "Виталик Штрафующий" с системой достижений
-Полностью рабочий бот готовый к деплою на BotHost/PythonAnywhere
+Полностью рабочий бот для BotHost/PythonAnywhere
+Исправлено для aiogram 3.10.0
 """
 
 import asyncio
 import logging
 import random
 import json
+import sys
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 from aiogram import Bot, Dispatcher, types, F, html
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
@@ -29,11 +32,15 @@ ADMIN_ID = 5775839902  # Ваш Telegram ID
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+# Инициализация бота с правильными параметрами для aiogram 3.10.0
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -112,7 +119,6 @@ async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
         user = await cursor.fetchone()
         if user:
             user_dict = dict(user)
-            # Десериализуем achievements из JSON
             if user_dict.get('achievements'):
                 try:
                     user_dict['achievements'] = json.loads(user_dict['achievements'])
@@ -159,7 +165,7 @@ async def update_balance(user_id: int, amount: int, txn_type: str, description: 
         )
         
         # Обновляем статистику
-        if amount > 0 and txn_type in ['paycheck', 'bonus', 'transfer_in']:
+        if amount > 0 and txn_type in ['paycheck', 'bonus', 'transfer_in', 'achievement']:
             await db.execute(
                 "UPDATE players SET total_earned = total_earned + ? WHERE user_id = ?",
                 (amount, user_id)
@@ -277,18 +283,6 @@ ACHIEVEMENTS = {
         'reward': 1000,
         'condition': lambda user: user.get('fines_count', 0) >= 20
     },
-    'lucky': {
-        'name': '🍀 Везунчик',
-        'description': 'Получить бонус 3 раза подряд в магазине',
-        'reward': 200,
-        'condition': lambda user: False  # Специальная логика в коде покупок
-    },
-    'worker': {
-        'name': '🏭 Работяга',
-        'description': 'Получить 50 получок',
-        'reward': 800,
-        'condition': lambda user: False  # Отслеживается отдельно
-    },
     'tycoon': {
         'name': '👑 Магнат',
         'description': 'Заработать в сумме 50,000₽',
@@ -348,20 +342,6 @@ SHOP_ITEMS = [
         "price": 300,
         "description": "Дает случайный бонус от Виталика!",
         "bonus_chance": 1.0
-    },
-    {
-        "id": "fine_protection",
-        "name": "🛡️ Защита от штрафа",
-        "price": 400,
-        "description": "Защита от одного штрафа Виталика",
-        "bonus_chance": 0.5
-    },
-    {
-        "id": "double_transfer",
-        "name": "↔️ Двойной перевод",
-        "price": 600,
-        "description": "Следующий перевод стоит в 2 раза меньше",
-        "bonus_chance": 0.6
     }
 ]
 
@@ -373,7 +353,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="🔁 Перевод"), KeyboardButton(text="📊 Профиль")],
         [KeyboardButton(text="🏆 Достижения"), KeyboardButton(text="📢 Рассылка")]
     ]
-    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие...")
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 def get_shop_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура для магазина"""
@@ -429,7 +409,7 @@ async def cmd_start(message: Message):
     """Обработчик команды /start"""
     user_id = message.from_user.id
     username = message.from_user.username or "Без username"
-    full_name = html.escape(message.from_user.full_name)
+    full_name = message.from_user.full_name
     
     is_new = await register_user(user_id, username, full_name)
     
@@ -491,10 +471,8 @@ async def handle_paycheck(message: Message):
     # Вычисляем сумму получки (100-500₽)
     base_amount = random.randint(100, 500)
     
-    # Проверяем активные бусты
+    # Проверяем активные бусты (упрощенная версия)
     paycheck_multiplier = 1.0
-    # Здесь можно добавить логику проверки активных бустов из покупок
-    
     paycheck_amount = int(base_amount * paycheck_multiplier)
     
     # Обновляем баланс и время
@@ -512,18 +490,14 @@ async def handle_paycheck(message: Message):
         f"Держи {paycheck_amount}₽! Но не трать всё на кофе... Или трать, мне-то что! ☕",
         f"Вот твоя получка: {paycheck_amount}₽. А теперь быстро на работу! ⚡",
         f"{paycheck_amount}₽ к твоему балансу. Не благодари, лучше не зли меня! 😈",
-        f"Получил {paycheck_amount}₽? Отлично! Теперь есть что терять... 🤑",
-        f"Ш-ш-ш... {paycheck_amount}₽ в конверте. Никому ни слова! 🤫",
-        f"Так, {paycheck_amount}₽... Кажется, я переплатил. Верни половину! 😠",
-        f"Получка {paycheck_amount}₽ выдана! Теперь можешь купить мне кофе! ☕"
+        f"Получил {paycheck_amount}₽? Отлично! Теперь есть что терять... 🤑"
     ]
     
     response = (
         f"💰 <b>Получка выдана!</b>\n\n"
         f"<b>Сумма:</b> +{paycheck_amount}₽\n"
         f"<b>Новый баланс:</b> {user['balance'] + paycheck_amount}₽\n\n"
-        f"💬 <i>Виталик:</i> {random.choice(jokes)}\n\n"
-        f"🏆 <i>Проверяем достижения...</i>"
+        f"💬 <i>Виталик:</i> {random.choice(jokes)}"
     )
     
     await message.answer(response)
@@ -534,8 +508,7 @@ async def handle_paycheck(message: Message):
         achievements_text = "\n".join([f"• {name} (+{reward}₽)" for name, reward in unlocked])
         await message.answer(
             f"🎉 <b>Новые достижения разблокированы!</b>\n\n"
-            f"{achievements_text}\n\n"
-            f"<i>Продолжай в том же духе!</i>"
+            f"{achievements_text}"
         )
 
 @dp.message(F.text == "🛒 Магазин")
@@ -594,10 +567,8 @@ async def handle_buy_item(callback: CallbackQuery):
         bonuses = [
             ("дополнительные 150₽", 150),
             ("буст x1.5 на следующую получку", 0),
-            ("шанс на подарок от Виталика", 0),
             ("защита от одного штрафа", 0),
-            ("бонусные 100₽", 100),
-            ("следующая покупка со скидкой 30%", 0)
+            ("бонусные 100₽", 100)
         ]
         bonus_text, bonus_amount = random.choice(bonuses)
     
@@ -630,8 +601,7 @@ async def handle_buy_item(callback: CallbackQuery):
         f"Отличная покупка! Но помни, я всё вижу... 👀",
         f"Так, купил {item['name']}... Интересно, на что потратишь дальше? 🤔",
         f"Покупка совершена! А теперь давай работать! 💼",
-        f"Хм, {item['name']}... Неплохой выбор! Но мой выбор лучше — штраф! 😈",
-        f"Купил {item['name']}? Надеюсь, это не взятка! 😏"
+        f"Хм, {item['name']}... Неплохой выбор! Но мой выбор лучше — штраф! 😈"
     ]
     
     response = (
@@ -760,8 +730,7 @@ async def handle_transfer_amount(message: Message, state: FSMContext):
         jokes = [
             f"Перевод выполнен! Надеюсь, это не взятка... 😏",
             f"Так, перевел {amount}₽... Интересно, за какие услуги? 🤫",
-            f"Деньги ушли! А теперь вернись к работе! 💼",
-            f"Перевод на {amount}₽... Может, мне тоже перевести? 😈"
+            f"Деньги ушли! А теперь вернись к работе! 💼"
         ]
         
         # Уведомляем отправителя
@@ -830,7 +799,6 @@ async def handle_profile(message: Message):
         f"<b>📈 Всего заработано:</b> {user['total_earned']}₽\n"
         f"<b>📉 Всего потрачено:</b> {user['total_spent']}₽\n\n"
         f"<b>📊 Статистика:</b>\n"
-        f"• 🏦 Получок: {user.get('paycheck_count', 0)}\n"
         f"• ⚖️ Штрафов: {user['fines_count']}\n"
         f"• 🛒 Покупок: {user['purchases_count']}\n"
         f"• 🔁 Переводов: {user['transfers_count']}\n\n"
@@ -949,7 +917,7 @@ async def handle_top_players(callback: CallbackQuery):
         elif i == 3: medal = "🥉"
         else: medal = f"{i}."
         
-        name = html.escape(user['full_name'])
+        name = user['full_name']
         if len(name) > 15:
             name = name[:12] + "..."
         
@@ -1053,12 +1021,7 @@ async def schedule_fines():
                 f"Опоздание на 0.0001 секунды! Штраф {fine_amount}₽! ⏰",
                 f"Слишком громко дышишь! Штраф {fine_amount}₽! 😤",
                 f"Заподозрен в излишней продуктивности! Штраф {fine_amount}₽! 🤨",
-                f"Не так посмотрел на Виталика! Штраф {fine_amount}₽! 👀",
-                f"Слишком идеально выполнил задание! Штраф {fine_amount}₽! 🎯",
-                f"Забыл поклониться начальству! Штраф {fine_amount}₽! 🙇",
-                f"Улыбка недостаточно искренняя! Штраф {fine_amount}₽! 😬",
-                f"Слишком мало штрафов получил! Штраф {fine_amount}₽! 📉",
-                f"Дышишь моим воздухом! Штраф {fine_amount}₽! 💨"
+                f"Не так посмотрел на Виталика! Штраф {fine_amount}₽! 👀"
             ]
             
             # Применяем штраф
@@ -1099,25 +1062,17 @@ async def schedule_fines():
             await asyncio.sleep(60)
 
 # ==================== ЗАПУСК БОТА ====================
-async def on_startup():
-    """Действия при запуске бота"""
-    await init_db()
-    asyncio.create_task(schedule_fines())
-    logger.info("Бот запущен и готов к работе!")
-
-async def on_shutdown():
-    """Действия при выключении бота"""
-    logger.info("Бот выключается...")
-
 async def main():
     """Основная функция запуска"""
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
+    # Инициализируем базу данных
+    await init_db()
     
-    logger.info("Запускаю бота...")
+    # Запускаем планировщик штрафов в фоне
+    asyncio.create_task(schedule_fines())
     
-    # Для PythonAnywhere/BotHost - удаляем вебхук и запускаем polling
-    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Бот запускается...")
+    
+    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
