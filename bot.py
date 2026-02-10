@@ -38,7 +38,7 @@ ECONOMY_SETTINGS = {
     "salary_min": 800,
     "salary_max": 2500,
     "salary_interval": 300,
-    "fine_chance": 0.25,
+    "fine_chance": 0.37,
     "random_fine_min": 200,
     "random_fine_max": 1000,
     "asphalt_earnings": 50,
