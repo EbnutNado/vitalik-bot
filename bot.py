@@ -729,31 +729,7 @@ async def handle_buy_item(callback: CallbackQuery):
     await callback.answer()
 
 # ==================== УКЛАДКА АСФАЛЬТА (ИСПРАВЛЕНА) ====================
-@dp.message(F.text == "🎮 Мини-игры")
-async def handle_minigames(message: Message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    
-    if not user:
-        await message.answer("Сначала зарегистрируйтесь через /start")
-        return
-    
-    games_text = (
-        "🎮 *КОРПОРАТИВНЫЕ МИНИ-ИГРЫ*\n\n"
-        "🎰 *Рулетка*\n"
-        f"• Минимальная ставка: {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}\n"
-        f"• Шанс выигрыша: {int(ECONOMY_SETTINGS['roulette_win_chance']*100)}%\n"
-        f"• Выигрыш: x2 от ставки\n\n"
-        "🛣️ *Укладка асфальта*\n"
-        f"• Заработок за метр: {format_money(ECONOMY_SETTINGS['asphalt_earnings'])}\n"
-        f"• Штраф за брак: {format_money(ECONOMY_SETTINGS['asphalt_fine_min'])}-{format_money(ECONOMY_SETTINGS['asphalt_fine_max'])}\n"
-        f"• Шанс успеха: 70%\n"
-        f"• Время работы: 30 секунд\n\n"
-        f"💰 Ваш баланс: {format_money(user['balance'])}"
-    )
-    
-    await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
-
+# ==================== УКЛАДКА АСФАЛЬТА (ИСПРАВЛЕННАЯ ВЕРСИЯ) ====================
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -764,30 +740,31 @@ async def handle_game_asphalt(callback: CallbackQuery):
         return
     
     can_work = True
-    wait_seconds = 0
+    wait_time = "0:00"
     
-    last_asphalt = user.get('last_asphalt')
-    if last_asphalt:
-        last_asphalt_time = datetime.fromisoformat(last_asphalt)
-        time_since_last = datetime.now() - last_asphalt_time
-        
-        if time_since_last.total_seconds() < 30:
-            can_work = False
-            wait_seconds = 30 - int(time_since_last.total_seconds())
-    
-    asphalt_text = (
-        f"🛣️ *Укладка асфальта*\n\n"
-        f"💰 Баланс: {format_money(user['balance'])}\n"
-        f"📏 Уложено метров: {user.get('asphalt_meters', 0):,}\n"
-        f"💵 Заработано: {format_money(user.get('asphalt_earned', 0))}\n\n"
-    )
+    # ПРАВИЛЬНАЯ проверка времени
+    if user.get('last_asphalt'):
+        try:
+            # Преобразуем строку в datetime
+            last_time_str = user['last_asphalt']
+            if last_time_str:
+                last_asphalt_time = datetime.fromisoformat(last_time_str)
+                time_since_last = datetime.now() - last_asphalt_time
+                
+                if time_since_last.total_seconds() < 30:
+                    can_work = False
+                    wait_seconds = 30 - int(time_since_last.total_seconds())
+                    wait_time = format_time(wait_seconds)
+        except Exception as e:
+            logger.error(f"Ошибка при проверке времени: {e}")
+            can_work = True  # Если ошибка, разрешаем работу
     
     if can_work:
-        nagirt_effects = await get_active_nagirt_effects(user_id)
-        if nagirt_effects["asphalt_boost"] > 0:
-            asphalt_text += f"💊 *Буст от Нагирта:* +{int(nagirt_effects['asphalt_boost']*100)}%\n\n"
-        
-        asphalt_text += (
+        asphalt_text = (
+            f"🛣️ *Укладка асфальта*\n\n"
+            f"💰 Баланс: {format_money(user['balance'])}\n"
+            f"📏 Уложено метров: {user.get('asphalt_meters', 0):,}\n"
+            f"💵 Заработано: {format_money(user.get('asphalt_earned', 0))}\n\n"
             f"*Расценки:*\n"
             f"• Успешная укладка: {format_money(ECONOMY_SETTINGS['asphalt_earnings'])}\n"
             f"• Штраф за брак: {format_money(ECONOMY_SETTINGS['asphalt_fine_min'])}-{format_money(ECONOMY_SETTINGS['asphalt_fine_max'])}\n"
@@ -796,8 +773,16 @@ async def handle_game_asphalt(callback: CallbackQuery):
             f"Нажми кнопку для работы 👇"
         )
     else:
-        wait_time = format_time(wait_seconds)
-        asphalt_text += f"⏳ *Перерыв для отдыха*\n\nПодожди еще *{wait_time}* (мм:сс)\n\nРаботать без отдыха опасно!"
+        asphalt_text = (
+            f"🛣️ *Укладка асфальта*\n\n"
+            f"💰 Баланс: {format_money(user['balance'])}\n"
+            f"📏 Уложено метров: {user.get('asphalt_meters', 0):,}\n"
+            f"💵 Заработано: {format_money(user.get('asphalt_earned', 0))}\n\n"
+            f"⏳ *Перерыв для отдыха*\n\n"
+            f"Асфальт еще сохнет!\n"
+            f"Подожди еще *{wait_time}* (мм:сс)\n\n"
+            f"Работать без отдыха опасно!"
+        )
     
     try:
         await callback.message.edit_text(
@@ -805,7 +790,8 @@ async def handle_game_asphalt(callback: CallbackQuery):
             parse_mode="Markdown",
             reply_markup=get_asphalt_keyboard(can_work)
         )
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка при редактировании сообщения: {e}")
         await callback.message.answer(
             asphalt_text,
             parse_mode="Markdown",
@@ -824,20 +810,31 @@ async def handle_lay_asphalt(callback: CallbackQuery):
     
     current_time = datetime.now()
     
+    # ПРАВИЛЬНАЯ проверка времени
+    can_work = True
     if user.get('last_asphalt'):
-        last_asphalt_time = datetime.fromisoformat(user['last_asphalt'])
-        time_since_last = (current_time - last_asphalt_time).total_seconds()
-        
-        if time_since_last < 30:
-            wait_seconds = 30 - int(time_since_last)
-            wait_time = format_time(wait_seconds)
-            await callback.answer(f"⏳ Отдыхай еще {wait_time}!", show_alert=True)
-            return
+        try:
+            last_time_str = user['last_asphalt']
+            if last_time_str:
+                last_asphalt_time = datetime.fromisoformat(last_time_str)
+                time_since_last = (current_time - last_asphalt_time).total_seconds()
+                
+                if time_since_last < 30:
+                    wait_seconds = 30 - int(time_since_last)
+                    wait_time = format_time(wait_seconds)
+                    await callback.answer(f"⏳ Отдыхай еще {wait_time}!", show_alert=True)
+                    return
+        except Exception as e:
+            logger.error(f"Ошибка при проверке времени в lay_asphalt: {e}")
+            # Если ошибка, разрешаем работу
     
+    # Получаем эффекты Нагирта
     nagirt_effects = await get_active_nagirt_effects(user_id)
     asphalt_boost = nagirt_effects["asphalt_boost"]
     
+    # 70% шанс успеха
     if random.random() <= 0.7:
+        # УСПЕХ
         base_earnings = ECONOMY_SETTINGS["asphalt_earnings"]
         earnings = int(base_earnings * (1 + asphalt_boost))
         
@@ -875,7 +872,24 @@ async def handle_lay_asphalt(callback: CallbackQuery):
             f"💳 Новый баланс: {format_money(user['balance'])}\n\n"
             f"Отличная работа! 🏗️"
         )
+        
+        # Обновляем сообщение
+        try:
+            await callback.message.edit_text(
+                result_text,
+                parse_mode="Markdown",
+                reply_markup=get_asphalt_keyboard(False)
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении сообщения: {e}")
+            await callback.message.answer(
+                result_text,
+                parse_mode="Markdown",
+                reply_markup=get_asphalt_keyboard(False)
+            )
+        
     else:
+        # ШТРАФ
         penalty = random.randint(
             ECONOMY_SETTINGS["asphalt_fine_min"],
             ECONOMY_SETTINGS["asphalt_fine_max"]
@@ -886,10 +900,9 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 '''UPDATE players 
                    SET balance = balance - ?,
                        last_asphalt = ?,
-                       last_penalty = ?,
                        total_fines = total_fines + ?
                    WHERE user_id = ?''',
-                (penalty, current_time.isoformat(), current_time.isoformat(), penalty, user_id)
+                (penalty, current_time.isoformat(), penalty, user_id)
             )
             await db.execute(
                 '''INSERT INTO transactions (user_id, type, amount, description)
@@ -914,23 +927,21 @@ async def handle_lay_asphalt(callback: CallbackQuery):
             f"💳 Новый баланс: {format_money(user['balance'])}\n\n"
             f"Будь внимательнее к качеству работы! ⚠️"
         )
-    
-    await callback.message.answer(result_text, parse_mode="Markdown")
-    
-    wait_text = "⏳ *Отдых после работы*\n\nПодожди 30 секунд перед следующей укладкой."
-    
-    try:
-        await callback.message.edit_text(
-            wait_text,
-            parse_mode="Markdown",
-            reply_markup=get_asphalt_keyboard(False)
-        )
-    except:
-        await callback.message.answer(
-            wait_text,
-            parse_mode="Markdown",
-            reply_markup=get_asphalt_keyboard(False)
-        )
+        
+        # Обновляем сообщение
+        try:
+            await callback.message.edit_text(
+                result_text,
+                parse_mode="Markdown",
+                reply_markup=get_asphalt_keyboard(False)
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении сообщения: {e}")
+            await callback.message.answer(
+                result_text,
+                parse_mode="Markdown",
+                reply_markup=get_asphalt_keyboard(False)
+            )
     
     await callback.answer()
 
@@ -944,17 +955,186 @@ async def handle_asphalt_wait(callback: CallbackQuery):
         return
     
     if user.get('last_asphalt'):
-        last_time = datetime.fromisoformat(user['last_asphalt'])
-        time_passed = (datetime.now() - last_time).total_seconds()
-        
-        if time_passed < 30:
-            wait_seconds = 30 - int(time_passed)
-            wait_time = format_time(wait_seconds)
-            await callback.answer(f"⏳ Подожди еще {wait_time}!", show_alert=True)
-        else:
-            await callback.answer("✅ Асфальт высох, можно укладывать!", show_alert=True)
+        try:
+            last_time_str = user['last_asphalt']
+            if last_time_str:
+                last_time = datetime.fromisoformat(last_time_str)
+                time_passed = (datetime.now() - last_time).total_seconds()
+                
+                if time_passed < 30:
+                    wait_seconds = 30 - int(time_passed)
+                    wait_time = format_time(wait_seconds)
+                    await callback.answer(f"⏳ Подожди еще {wait_time}!", show_alert=True)
+                else:
+                    await callback.answer("✅ Асфальт высох, можно укладывать!", show_alert=True)
+                    
+                    # Обновляем меню, если время вышло
+                    asphalt_text = (
+                        f"🛣️ *Укладка асфальта*\n\n"
+                        f"💰 Баланс: {format_money(user['balance'])}\n"
+                        f"📏 Уложено метров: {user.get('asphalt_meters', 0):,}\n"
+                        f"💵 Заработано: {format_money(user.get('asphalt_earned', 0))}\n\n"
+                        f"Нажми кнопку ниже, чтобы уложить 1 метр асфальта!\n"
+                        f"⏱️ Перерыв между укладкой: 30 секунд"
+                    )
+                    
+                    try:
+                        await callback.message.edit_text(
+                            asphalt_text,
+                            parse_mode="Markdown",
+                            reply_markup=get_asphalt_keyboard(True)
+                        )
+                    except:
+                        pass
+        except Exception as e:
+            logger.error(f"Ошибка в asphalt_wait: {e}")
+            await callback.answer("✅ Можно начинать укладку!", show_alert=True)
     else:
         await callback.answer("✅ Можно начинать укладку!", show_alert=True)
+
+# ==================== МИНИ-ИГРЫ (корректное меню) ====================
+@dp.message(F.text == "🎮 Мини-игры")
+async def handle_minigames(message: Message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь через /start")
+        return
+    
+    # Проверяем, можно ли работать с асфальтом
+    can_work_asphalt = True
+    if user.get('last_asphalt'):
+        try:
+            last_time_str = user['last_asphalt']
+            if last_time_str:
+                last_asphalt_time = datetime.fromisoformat(last_time_str)
+                time_since_last = datetime.now() - last_asphalt_time
+                if time_since_last.total_seconds() < 30:
+                    can_work_asphalt = False
+        except:
+            can_work_asphalt = True
+    
+    games_text = (
+        "🎮 *КОРПОРАТИВНЫЕ МИНИ-ИГРЫ*\n\n"
+        "🎰 *Рулетка*\n"
+        f"• Минимальная ставка: {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}\n"
+        f"• Шанс выигрыша: {int(ECONOMY_SETTINGS['roulette_win_chance']*100)}%\n"
+        f"• Выигрыш: x2 от ставки\n\n"
+        "🛣️ *Укладка асфальта*\n"
+        f"• Заработок за метр: {format_money(ECONOMY_SETTINGS['asphalt_earnings'])}\n"
+        f"• Штраф за брак: {format_money(ECONOMY_SETTINGS['asphalt_fine_min'])}-{format_money(ECONOMY_SETTINGS['asphalt_fine_max'])}\n"
+        f"• Шанс успеха: 70%\n"
+        f"• Время работы: 30 секунд\n\n"
+        f"💰 Ваш баланс: {format_money(user['balance'])}"
+    )
+    
+    await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
+
+# ==================== РУЛЕТКА (рабочая версия) ====================
+@dp.callback_query(F.data == "game_roulette")
+async def handle_game_roulette_start(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        f"🎰 *КОРПОРАТИВНАЯ РУЛЕТКА*\n\n"
+        f"💰 Ваш баланс: {format_money(user['balance'])}\n"
+        f"🎯 Шанс выигрыша: {int(ECONOMY_SETTINGS['roulette_win_chance']*100)}%\n"
+        f"💰 Выигрыш: x2 от ставки\n\n"
+        f"💸 *Введите сумму ставки:*\n"
+        f"Минимум: {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}\n"
+        f"Максимум: {format_money(min(ECONOMY_SETTINGS['roulette_max_bet'], user['balance']))}",
+        parse_mode="Markdown"
+    )
+    
+    await state.set_state(RouletteStates.waiting_for_bet)
+    await callback.answer()
+
+@dp.message(RouletteStates.waiting_for_bet)
+async def handle_roulette_bet(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь через /start")
+        await state.clear()
+        return
+    
+    try:
+        bet = int(message.text)
+        
+        if bet < ECONOMY_SETTINGS["roulette_min_bet"]:
+            await message.answer(f"❌ Минимальная ставка - {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}")
+            return
+        if bet > user['balance']:
+            await message.answer(f"❌ Недостаточно средств! Доступно: {format_money(user['balance'])}")
+            return
+        if bet > ECONOMY_SETTINGS["roulette_max_bet"]:
+            await message.answer(f"❌ Максимальная ставка - {format_money(ECONOMY_SETTINGS['roulette_max_bet'])}")
+            return
+        
+        # Играем
+        win = random.random() <= ECONOMY_SETTINGS["roulette_win_chance"]
+        
+        async with aiosqlite.connect(DB_NAME) as db:
+            if win:
+                # Выигрыш: x2 от ставки
+                win_amount = bet * 2
+                await db.execute(
+                    "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                    (bet, user_id)  # Добавляем только чистый выигрыш (ставка уже включена)
+                )
+                
+                result_text = (
+                    f"🎰 *РУЛЕТКА*\n\n"
+                    f"🎉 *ПОБЕДА!*\n\n"
+                    f"💰 Ставка: {format_money(bet)}\n"
+                    f"🏆 Выигрыш: {format_money(win_amount)}\n"
+                    f"💎 Чистая прибыль: {format_money(bet)}\n"
+                    f"💰 Новый баланс: {format_money(user['balance'] + bet)}\n\n"
+                    f"Везет же некоторым! 🎰"
+                )
+                
+                await db.execute(
+                    '''INSERT INTO transactions (user_id, type, amount, description)
+                       VALUES (?, 'roulette', ?, 'Выигрыш в рулетке')''',
+                    (user_id, bet, "Выигрыш в рулетке")
+                )
+            else:
+                # Проигрыш
+                await db.execute(
+                    "UPDATE players SET balance = balance - ? WHERE user_id = ?",
+                    (bet, user_id)
+                )
+                
+                result_text = (
+                    f"🎰 *РУЛЕТКА*\n\n"
+                    f"💥 *ПРОИГРЫШ!*\n\n"
+                    f"💰 Ставка: {format_money(bet)}\n"
+                    f"📉 Потеряно: {format_money(bet)}\n"
+                    f"💰 Новый баланс: {format_money(user['balance'] - bet)}\n\n"
+                    f"Не повезло... 🍀"
+                )
+                
+                await db.execute(
+                    '''INSERT INTO transactions (user_id, type, amount, description)
+                       VALUES (?, 'roulette', -?, 'Проигрыш в рулетке')''',
+                    (user_id, bet, "Проигрыш в рулетке")
+                )
+            
+            await db.commit()
+        
+        await message.answer(result_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
+        
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число!")
+    finally:
+        await state.clear()
 
 # ==================== ПЕРЕВОДЫ (ИСПРАВЛЕНЫ) ====================
 @dp.message(F.text == "🔁 Перевод")
