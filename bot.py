@@ -724,40 +724,19 @@ async def handle_buy_item(callback: CallbackQuery):
     await callback.answer()
 
 # ==================== УКЛАДКА АСФАЛЬТА (РАБОЧАЯ ПРОСТАЯ ВЕРСИЯ) ====================
-@dp.message(F.text == "🎮 Мини-игры")
-async def handle_minigames(message: Message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    
-    if not user:
-        await message.answer("Сначала зарегистрируйтесь через /start")
-        return
-    
-    games_text = (
-        "🎮 *КОРПОРАТИВНЫЕ МИНИ-ИГРЫ*\n\n"
-        "🎰 *Рулетка*\n"
-        f"• Минимальная ставка: {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}\n"
-        f"• Шанс выигрыша: {int(ECONOMY_SETTINGS['roulette_win_chance']*100)}%\n"
-        f"• Выигрыш: x2 от ставки\n\n"
-        "🛣️ *Укладка асфальта*\n"
-        f"• Заработок за метр: {format_money(ECONOMY_SETTINGS['asphalt_earnings'])}\n"
-        f"• Штраф за брак: {format_money(ECONOMY_SETTINGS['asphalt_fine_min'])}-{format_money(ECONOMY_SETTINGS['asphalt_fine_max'])}\n"
-        f"• Шанс успеха: 70%\n"
-        f"• Время работы: 30 секунд\n\n"
-        f"💰 Ваш баланс: {format_money(user['balance'])}"
-    )
-    
-    await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
-
+# ==================== УКЛАДКА АСФАЛЬТА С НАГИРТОМ (ИСПРАВЛЕННАЯ) ====================
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
-    """Меню укладки асфальта"""
+    """Меню укладки асфальта с отображением эффектов Нагирта"""
     user_id = callback.from_user.id
     user = await get_user(user_id)
     
     if not user:
         await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
+    
+    # Получаем эффекты нагирта
+    nagirt_effects = await get_active_nagirt_effects(user_id)
     
     # Простая проверка времени
     can_work = True
@@ -778,6 +757,13 @@ async def handle_game_asphalt(callback: CallbackQuery):
         f"📏 Уложено метров: {user.get('asphalt_meters', 0):,}\n"
         f"💵 Заработано: {format_money(user.get('asphalt_earned', 0))}\n\n"
     )
+    
+    # Показываем эффекты Нагирта
+    if nagirt_effects["has_active"]:
+        asphalt_text += f"💊 *Активный Нагирт:* +{int(nagirt_effects['asphalt_boost']*100)}% к заработку\n"
+        if nagirt_effects["side_effects"]:
+            asphalt_text += f"⚠️ *Побочки:* {', '.join(nagirt_effects['side_effects'][:2])}\n"
+        asphalt_text += "\n"
     
     if can_work:
         asphalt_text += "Нажми кнопку ниже, чтобы уложить 1 метр асфальта!"
@@ -801,7 +787,7 @@ async def handle_game_asphalt(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "lay_asphalt")
 async def handle_lay_asphalt(callback: CallbackQuery):
-    """Простая укладка асфальта - ВСЁ РАБОТАЕТ"""
+    """Укладка асфальта с учетом таблеток Нагирт - ИСПРАВЛЕНО"""
     user_id = callback.from_user.id
     
     # Получаем данные пользователя
@@ -809,6 +795,9 @@ async def handle_lay_asphalt(callback: CallbackQuery):
     if not user:
         await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
+    
+    # Получаем активные эффекты нагирта
+    nagirt_effects = await get_active_nagirt_effects(user_id)
     
     # Проверяем время последней укладки
     current_time = datetime.now()
@@ -826,12 +815,45 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         except:
             pass  # Если ошибка, продолжаем
     
-    # Определяем успех или штраф (70% успеха)
-    success = random.random() <= 0.7
+    # Определяем успех или штраф (70% успеха, но нагирт может влиять)
+    base_success_chance = 0.7
+    success_chance = base_success_chance
+    
+    # Нагирт может УВЕЛИЧИТЬ шанс успеха или УМЕНЬШИТЬ его из-за побочек
+    if nagirt_effects["has_active"]:
+        # Нагирт увеличивает шанс успеха
+        success_chance = min(0.95, base_success_chance + (nagirt_effects["asphalt_boost"] * 0.15))
+        
+        # Но побочные эффекты МОГУТ уменьшить шанс
+        if nagirt_effects["side_effects"]:
+            # Каждый побочный эффект снижает шанс на 5%
+            success_chance = max(0.3, success_chance - (len(nagirt_effects["side_effects"]) * 0.05))
+    
+    success = random.random() <= success_chance
     
     if success:
         # УСПЕХ
-        earnings = ECONOMY_SETTINGS["asphalt_earnings"]
+        base_earnings = ECONOMY_SETTINGS["asphalt_earnings"]
+        
+        # Увеличиваем заработок за счет нагирта
+        if nagirt_effects["has_active"]:
+            earnings_multiplier = 1.0 + nagirt_effects["asphalt_boost"]
+            earnings = int(base_earnings * earnings_multiplier)
+            
+            # Дополнительный бонус за побочные эффекты? Нет, они только ухудшают
+            # Но если нет побочных эффектов, можно дать небольшой бонус
+            if not nagirt_effects["side_effects"] and nagirt_effects["asphalt_boost"] > 0:
+                earnings = int(earnings * 1.1)  # +10% если нет побочек
+        else:
+            earnings = base_earnings
+        
+        # Редкий джекпот (1% шанс)
+        if random.random() <= 0.01:
+            jackpot_bonus = earnings * 5
+            earnings += jackpot_bonus
+            jackpot_message = f"\n🎰 ДЖЕКПОТ! +{format_money(jackpot_bonus)}"
+        else:
+            jackpot_message = ""
         
         async with aiosqlite.connect(DB_NAME) as db:
             # Обновляем баланс и статистику
@@ -844,11 +866,11 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 WHERE user_id = ?
             ''', (earnings, earnings, current_time.isoformat(), user_id))
             
-            # Записываем транзакцию
+            # Записываем транзакцию - ИСПРАВЛЕНО
             await db.execute('''
                 INSERT INTO transactions (user_id, type, amount, description)
-                VALUES (?, 'asphalt', ?, 'Укладка асфальта')
-            ''', (user_id, earnings, "Укладка асфальта"))
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, 'asphalt', earnings, 'Укладка асфальта' + (' + Нагирт' if nagirt_effects["has_active"] else '')))
             
             await db.commit()
         
@@ -858,18 +880,44 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         result_text = (
             f"✅ *Асфальт уложен!*\n\n"
             f"🛣️ Уложен 1 метр асфальта\n"
+        )
+        
+        if nagirt_effects["has_active"]:
+            result_text += f"💊 *Эффект Нагирта:* +{int(nagirt_effects['asphalt_boost']*100)}%\n"
+        
+        result_text += (
             f"💰 Заработано: {format_money(earnings)}\n"
             f"📏 Всего метров: {user.get('asphalt_meters', 0):,}\n"
             f"💵 Заработано всего: {format_money(user.get('asphalt_earned', 0))}\n"
-            f"💳 Баланс: {format_money(user['balance'])}\n\n"
-            f"Отличная работа! 🏗️"
+            f"💳 Баланс: {format_money(user['balance'])}"
         )
+        
+        if jackpot_message:
+            result_text += jackpot_message
+        
+        result_text += "\n\nОтличная работа! 🏗️"
+        
     else:
         # ШТРАФ
-        penalty = random.randint(
+        base_penalty = random.randint(
             ECONOMY_SETTINGS["asphalt_fine_min"],
             ECONOMY_SETTINGS["asphalt_fine_max"]
         )
+        
+        # Нагирт может УВЕЛИЧИТЬ штраф из-за побочных эффектов
+        if nagirt_effects["has_active"] and nagirt_effects["side_effects"]:
+            # Каждый побочный эффект увеличивает штраф на 20%
+            penalty_multiplier = 1.0 + (len(nagirt_effects["side_effects"]) * 0.2)
+            penalty = int(base_penalty * penalty_multiplier)
+            penalty_reason = f"Штраф за плохую укладку + побочки Нагирта"
+        else:
+            penalty = base_penalty
+            penalty_reason = "Штраф за плохую укладку"
+        
+        # Но если есть нагирт без побочек, можно смягчить штраф
+        if nagirt_effects["has_active"] and not nagirt_effects["side_effects"]:
+            penalty = max(ECONOMY_SETTINGS["asphalt_fine_min"], int(penalty * 0.7))
+            penalty_reason = "Штраф смягчен (Нагирт без побочек)"
         
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute('''
@@ -880,10 +928,11 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 WHERE user_id = ?
             ''', (penalty, current_time.isoformat(), penalty, user_id))
             
+            # Записываем транзакцию - ИСПРАВЛЕНО
             await db.execute('''
                 INSERT INTO transactions (user_id, type, amount, description)
-                VALUES (?, 'penalty', -?, 'Штраф за плохую укладку')
-            ''', (user_id, penalty, "Штраф за плохую укладку"))
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, 'penalty', -penalty, penalty_reason))
             
             await db.commit()
         
@@ -892,10 +941,20 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         result_text = (
             f"⚠️ *ВИТАЛИК ШТРАФУЕТ!*\n\n"
             f"🛣️ Асфальт уложен криво!\n"
+        )
+        
+        if nagirt_effects["has_active"]:
+            result_text += f"💊 *Влияние Нагирта:* {int((success_chance - base_success_chance)*100)}% к шансу\n"
+        
+        result_text += (
             f"💸 Штраф: {format_money(penalty)}\n"
             f"💳 Баланс: {format_money(user['balance'])}\n\n"
             f"Будь внимательнее! ⚠️"
         )
+        
+        # Если есть побочные эффекты, добавляем сообщение
+        if nagirt_effects["side_effects"]:
+            result_text += f"\n\n💊 *Побочки:* {', '.join(nagirt_effects['side_effects'])}"
     
     # Отправляем результат
     await callback.message.answer(result_text, parse_mode="Markdown")
@@ -905,10 +964,16 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         f"🛣️ *Укладка асфальта*\n\n"
         f"💰 Баланс: {format_money(user['balance'])}\n"
         f"📏 Уложено метров: {user.get('asphalt_meters', 0):,}\n"
-        f"💵 Заработано: {format_money(user.get('asphalt_earned', 0))}\n\n"
-        f"⏳ Асфальт сохнет...\n"
-        f"Жди 30 секунд перед следующей укладкой."
+        f"💵 Заработано: {format_money(user.get('asphalt_earned', 0))}\n"
     )
+    
+    # Показываем эффекты нагирта
+    if nagirt_effects["has_active"]:
+        menu_text += f"\n💊 *Нагирт активен:* +{int(nagirt_effects['asphalt_boost']*100)}% к заработку"
+        if nagirt_effects["side_effects"]:
+            menu_text += f"\n⚠️ Побочки: {', '.join(nagirt_effects['side_effects'][:2])}"
+    
+    menu_text += f"\n\n⏳ Асфальт сохнет...\nЖди 30 секунд перед следующей укладкой."
     
     try:
         await callback.message.edit_text(
@@ -925,63 +990,10 @@ async def handle_lay_asphalt(callback: CallbackQuery):
     
     await callback.answer()
 
-@dp.callback_query(F.data == "asphalt_wait")
-async def handle_asphalt_wait(callback: CallbackQuery):
-    """Проверка времени ожидания"""
-    user_id = callback.from_user.id
-    user = await get_user(user_id)
-    
-    if not user:
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
-    
-    last_asphalt = user.get('last_asphalt')
-    if last_asphalt:
-        try:
-            last_time = datetime.fromisoformat(last_asphalt)
-            time_passed = (datetime.now() - last_time).total_seconds()
-            
-            if time_passed < 30:
-                wait_time = 30 - int(time_passed)
-                await callback.answer(f"⏳ Жди еще {wait_time} секунд!", show_alert=True)
-            else:
-                await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
-        except:
-            await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
-    else:
-        await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
-
-# ==================== РУЛЕТКА (РАБОЧАЯ ПРОСТАЯ ВЕРСИЯ) ====================
-@dp.callback_query(F.data == "game_roulette")
-async def handle_game_roulette_start(callback: CallbackQuery, state: FSMContext):
-    """Начало игры в рулетку"""
-    user_id = callback.from_user.id
-    user = await get_user(user_id)
-    
-    if not user:
-        await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
-        return
-    
-    roulette_text = (
-        f"🎰 *РУЛЕТКА*\n\n"
-        f"💰 Ваш баланс: {format_money(user['balance'])}\n"
-        f"🎯 Шанс выигрыша: {int(ECONOMY_SETTINGS['roulette_win_chance']*100)}%\n"
-        f"💰 Выигрыш: x2 от ставки\n\n"
-        f"💸 *Введите сумму ставки:*\n"
-        f"Минимум: {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}\n"
-        f"Максимум: {format_money(min(ECONOMY_SETTINGS['roulette_max_bet'], user['balance']))}"
-    )
-    
-    await callback.message.edit_text(roulette_text, parse_mode="Markdown")
-    
-    # Сохраняем данные для состояния
-    await state.update_data(user_id=user_id, user_balance=user['balance'])
-    await state.set_state(RouletteStates.waiting_for_bet)
-    await callback.answer()
-
+# ==================== РУЛЕТКА (ИСПРАВЛЕННАЯ ВЕРСИЯ) ====================
 @dp.message(RouletteStates.waiting_for_bet)
 async def handle_roulette_bet(message: Message, state: FSMContext):
-    """Обработка ставки в рулетке"""
+    """Обработка ставки в рулетке - ИСПРАВЛЕНО"""
     user_id = message.from_user.id
     data = await state.get_data()
     
@@ -1030,11 +1042,11 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
                     (bet, user_id)  # Добавляем только выигрыш, ставка остается
                 )
                 
-                # Записываем транзакцию
+                # Записываем транзакцию - ИСПРАВЛЕНО
                 await db.execute(
                     '''INSERT INTO transactions (user_id, type, amount, description)
-                       VALUES (?, 'roulette', ?, 'Выигрыш в рулетке')''',
-                    (user_id, bet, f"Выигрыш в рулетке: ставка {bet}₽")
+                       VALUES (?, ?, ?, ?)''',
+                    (user_id, 'roulette_win', bet, f"Выигрыш в рулетке: ставка {bet}₽")
                 )
                 
                 await db.commit()
@@ -1059,11 +1071,11 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
                     (bet, user_id)
                 )
                 
-                # Записываем транзакцию
+                # Записываем транзакцию - ИСПРАВЛЕНО
                 await db.execute(
                     '''INSERT INTO transactions (user_id, type, amount, description)
-                       VALUES (?, 'roulette', -?, 'Проигрыш в рулетке')''',
-                    (user_id, bet, f"Проигрыш в рулетке: ставка {bet}₽")
+                       VALUES (?, ?, ?, ?)''',
+                    (user_id, 'roulette_lose', -bet, f"Проигрыш в рулетке: ставка {bet}₽")
                 )
                 
                 await db.commit()
@@ -1089,6 +1101,32 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
         await message.answer("❌ Произошла ошибка, попробуйте еще раз")
     
     await state.clear()
+
+@dp.callback_query(F.data == "asphalt_wait")
+async def handle_asphalt_wait(callback: CallbackQuery):
+    """Проверка времени ожидания"""
+    user_id = callback.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    
+    last_asphalt = user.get('last_asphalt')
+    if last_asphalt:
+        try:
+            last_time = datetime.fromisoformat(last_asphalt)
+            time_passed = (datetime.now() - last_time).total_seconds()
+            
+            if time_passed < 30:
+                wait_time = 30 - int(time_passed)
+                await callback.answer(f"⏳ Жди еще {wait_time} секунд!", show_alert=True)
+            else:
+                await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
+        except:
+            await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
+    else:
+        await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
 
 # ==================== ПЕРЕВОДЫ ====================
 @dp.message(F.text == "🔁 Перевод")
