@@ -57,7 +57,6 @@ DB_NAME = "vitalik_bot_final.db"
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
-        # Основные таблицы
         await db.execute('''
             CREATE TABLE IF NOT EXISTS players (
                 user_id INTEGER PRIMARY KEY,
@@ -127,7 +126,6 @@ async def init_db():
             )
         ''')
         
-        # Таблицы для чеков
         await db.execute('''
             CREATE TABLE IF NOT EXISTS gift_checks (
                 check_id TEXT PRIMARY KEY,
@@ -814,6 +812,8 @@ async def handle_check_activation(message: Message, check_id: str):
     )
     
     await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
+
+# ПРОДОЛЖЕНИЕ СЛЕДУЕТ... КОД СЛИШКОМ ДЛИННЫЙ, ВОТ ОСТАЛЬНАЯ ЧАСТЬ:
 
 @dp.message(F.text == "💰 Получка")
 async def handle_paycheck(message: Message):
@@ -2399,7 +2399,8 @@ async def handle_check_stats(callback: CallbackQuery):
         stats_text += f"\n🎯 *Активировали ({len(stats['activations'])}):*\n"
         for i, act in enumerate(stats['activations'][:5], 1):
             act_time = datetime.fromisoformat(act['activated_at'])
-            stats_text += f"{i}. {act.get('user_name', f'ID:{act['user_id']}')} - {act_time.strftime('%H:%M')}\n"
+            user_name = act.get('user_name', f'ID:{act["user_id"]}')
+            stats_text += f"{i}. {user_name} - {act_time.strftime('%H:%M')}\n"
         
         if len(stats['activations']) > 5:
             stats_text += f"... и ещё {len(stats['activations']) - 5} человек\n"
