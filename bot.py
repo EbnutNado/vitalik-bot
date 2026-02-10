@@ -1948,6 +1948,27 @@ async def handle_statistics(message: Message):
         except:
             # Если и это не работает, пробуем совсем без эмодзи
             await message.answer("Статистика временно недоступна. Попробуйте позже.")
+            async def check_db_columns():
+    """Проверка наличия всех необходимых столбцов"""
+    required_columns = [
+        'asphalt_meters', 'asphalt_earned', 'total_earned', 
+        'total_fines', 'salary_count'
+    ]
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("PRAGMA table_info(players)")
+        columns = await cursor.fetchall()
+        existing_columns = [col[1] for col in columns]
+        
+        for col in required_columns:
+            if col not in existing_columns:
+                logger.warning(f"Отсутствует столбец {col} в таблице players")
+                try:
+                    await db.execute(f"ALTER TABLE players ADD COLUMN {col} INTEGER DEFAULT 0")
+                    await db.commit()
+                    logger.info(f"Добавлен столбец {col}")
+                except Exception as e:
+                    logger.error(f"Не удалось добавить столбец {col}: {e}")
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 @dp.message(F.text == "👑 Админ-панель")
