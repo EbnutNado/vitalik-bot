@@ -656,47 +656,39 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
-# ========== ИСПРАВЛЕННАЯ УКЛАДКА АСФАЛЬТА ==========
+# ========== РАБОЧАЯ УКЛАДКА АСФАЛЬТА ==========
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = await get_user(user_id)
     
     if not user:
-        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+        await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
     
+    # Проверяем, можно ли работать
     can_work = True
-    wait_time = 0
-    
-    last_asphalt = user.get('last_asphalt')
-    if last_asphalt:
-        last_asphalt_time = datetime.fromisoformat(last_asphalt)
-        time_since_last = datetime.now() - last_asphalt_time
-        min_wait = timedelta(seconds=30)
-        
-        if time_since_last < min_wait:
+    if user.get('last_asphalt'):
+        last_asphalt_time = datetime.fromisoformat(user['last_asphalt'])
+        time_passed = (datetime.now() - last_asphalt_time).total_seconds()
+        if time_passed < 30:
             can_work = False
-            wait_time = int((min_wait - time_since_last).total_seconds())
+    
+    asphalt_text = (
+        f"🛣️ *Укладка асфальта*\n\n"
+        f"💰 Твой баланс: {user['balance']}₽\n"
+        f"📏 Уложено метров: {user.get('asphalt_meters', 0)}\n"
+        f"💵 Заработано на асфальте: {user.get('asphalt_earned', 0)}₽\n\n"
+    )
     
     if can_work:
-        asphalt_text = (
-            f"🛣️ *Укладка асфальта*\n\n"
-            f"💰 Твой баланс: {user['balance']}₽\n"
-            f"📏 Уложено метров: {user.get('asphalt_meters', 0)}\n"
-            f"💵 Заработано на асфальте: {user.get('asphalt_earned', 0)}₽\n\n"
-            f"Нажми кнопку ниже, чтобы уложить 1 метр асфальта.\n"
-            f"За каждый метр получишь 10₽, но будь осторожен — Виталик может оштрафовать!\n\n"
-            f"⏱️ Перерыв между укладкой: 30 секунд"
-        )
+        asphalt_text += "Нажми кнопку ниже, чтобы уложить 1 метр асфальта.\nЗа каждый метр получишь 10₽!\n\n⏱️ Перерыв между укладкой: 30 секунд"
     else:
-        asphalt_text = (
-            f"🛣️ *Укладка асфальта*\n\n"
-            f"⏳ Асфальт еще сохнет!\n"
-            f"Подожди еще {wait_time} секунд.\n\n"
-            f"📏 Уложено метров: {user.get('asphalt_meters', 0)}\n"
-            f"💵 Заработано на асфальте: {user.get('asphalt_earned', 0)}₽"
-        )
+        if user.get('last_asphalt'):
+            last_time = datetime.fromisoformat(user['last_asphalt'])
+            time_left = 30 - (datetime.now() - last_time).total_seconds()
+            if time_left > 0:
+                asphalt_text += f"⏳ Асфальт еще сохнет!\nПодожди еще {int(time_left)} секунд."
     
     try:
         await callback.message.edit_text(
@@ -704,12 +696,13 @@ async def handle_game_asphalt(callback: CallbackQuery):
             parse_mode="Markdown",
             reply_markup=get_asphalt_keyboard(can_work)
         )
-    except:
+    except Exception as e:
         await callback.message.answer(
             asphalt_text,
             parse_mode="Markdown",
             reply_markup=get_asphalt_keyboard(can_work)
         )
+    
     await callback.answer()
 
 @dp.callback_query(F.data == "lay_asphalt")
@@ -718,38 +711,48 @@ async def handle_lay_asphalt(callback: CallbackQuery):
     user = await get_user(user_id)
     
     if not user:
-        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+        await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
     
-    last_asphalt = user.get('last_asphalt')
-    if last_asphalt:
-        last_asphalt_time = datetime.fromisoformat(last_asphalt)
-        time_since_last = datetime.now() - last_asphalt_time
-        min_wait = timedelta(seconds=30)
+    # Проверяем время последней укладки
+    current_time = datetime.now()
+    if user.get('last_asphalt'):
+        last_asphalt_time = datetime.fromisoformat(user['last_asphalt'])
+        time_passed = (current_time - last_asphalt_time).total_seconds()
         
-        if time_since_last < min_wait:
-            wait_time = int((min_wait - time_since_last).total_seconds())
+        if time_passed < 30:
+            wait_time = 30 - int(time_passed)
             await callback.answer(f"⏳ Подожди еще {wait_time} секунд!", show_alert=True)
             return
     
-    # 70% шанс успеха, 30% шанс штрафа
-    if random.random() <= 0.7:
+    # ОПАСНОСТЬ: 30% шанс штрафа
+    if random.random() <= 0.7:  # 70% успеха
         earnings = 10
         
+        # Обновляем базу данных
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(
-                "UPDATE players SET balance = balance + ?, asphalt_meters = asphalt_meters + 1, asphalt_earned = asphalt_earned + ?, last_asphalt = ? WHERE user_id = ?",
-                (earnings, earnings, datetime.now().isoformat(), user_id)
-            )
-            await db.execute(
-                '''INSERT INTO transactions (user_id, type, amount, description)
-                   VALUES (?, 'asphalt', ?, 'Укладка 1 метра асфальта')''',
-                (user_id, earnings, "Укладка 1 метра асфальта")
-            )
+            # Увеличиваем баланс и счетчики
+            await db.execute('''
+                UPDATE players 
+                SET balance = balance + ?, 
+                    asphalt_meters = asphalt_meters + 1,
+                    asphalt_earned = asphalt_earned + ?,
+                    last_asphalt = ?
+                WHERE user_id = ?
+            ''', (earnings, earnings, current_time.isoformat(), user_id))
+            
+            # Добавляем транзакцию
+            await db.execute('''
+                INSERT INTO transactions (user_id, type, amount, description)
+                VALUES (?, 'asphalt', ?, ?)
+            ''', (user_id, earnings, "Укладка 1 метра асфальта"))
+            
             await db.commit()
         
+        # Получаем обновленные данные
         user = await get_user(user_id)
         
+        # ОТПРАВЛЯЕМ НОВОЕ СООБЩЕНИЕ вместо редактирования
         result_text = (
             f"✅ *Асфальт уложен успешно!*\n\n"
             f"🛣️ Уложен 1 метр асфальта\n"
@@ -759,19 +762,49 @@ async def handle_lay_asphalt(callback: CallbackQuery):
             f"💰 Новый баланс: *{user['balance']}₽*\n\n"
             f"Хорошая работа! 🏗️"
         )
-    else:
+        
+        await callback.message.answer(result_text, parse_mode="Markdown")
+        
+        # Обновляем меню укладки
+        new_menu_text = (
+            f"🛣️ *Укладка асфальта*\n\n"
+            f"💰 Твой баланс: {user['balance']}₽\n"
+            f"📏 Уложено метров: {user.get('asphalt_meters', 0)}\n"
+            f"💵 Заработано на асфальте: {user.get('asphalt_earned', 0)}₽\n\n"
+            f"⏳ Асфальт еще сохнет!\nПодожди 30 секунд."
+        )
+        
+        try:
+            await callback.message.edit_text(
+                new_menu_text,
+                parse_mode="Markdown",
+                reply_markup=get_asphalt_keyboard(False)
+            )
+        except:
+            await callback.message.answer(
+                new_menu_text,
+                parse_mode="Markdown",
+                reply_markup=get_asphalt_keyboard(False)
+            )
+        
+    else:  # 30% штраф
         penalty = random.randint(5, 20)
         
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(
-                "UPDATE players SET balance = balance - ?, last_asphalt = ?, last_penalty = ?, total_penalties = total_penalties + 1 WHERE user_id = ?",
-                (penalty, datetime.now().isoformat(), datetime.now().isoformat(), user_id)
-            )
-            await db.execute(
-                '''INSERT INTO transactions (user_id, type, amount, description)
-                   VALUES (?, 'penalty', -?, 'Штраф за плохую укладку асфальта')''',
-                (user_id, penalty, "Штраф за плохую укладку асфальта")
-            )
+            await db.execute('''
+                UPDATE players 
+                SET balance = balance - ?,
+                    last_asphalt = ?,
+                    last_penalty = ?,
+                    total_penalties = total_penalties + 1
+                WHERE user_id = ?
+            ''', (penalty, current_time.isoformat(), current_time.isoformat(), user_id))
+            
+            await db.execute('''
+                INSERT INTO transactions (user_id, type, amount, description)
+                VALUES (?, 'penalty', -?, ?)
+            ''', (user_id, penalty, "Штраф за плохую укладку асфальта"))
+            
             await db.commit()
         
         user = await get_user(user_id)
@@ -783,6 +816,7 @@ async def handle_lay_asphalt(callback: CallbackQuery):
             "оставил мусор на дороге! 🗑️"
         ]
         
+        # ОТПРАВЛЯЕМ ШТРАФ
         result_text = (
             f"⚠️ *ВИТАЛИК ШТРАФУЕТ!*\n\n"
             f"🛣️ При укладке асфальта: {random.choice(penalty_reasons)}\n"
@@ -790,20 +824,30 @@ async def handle_lay_asphalt(callback: CallbackQuery):
             f"💰 Новый баланс: *{user['balance']}₽*\n\n"
             f"Будь внимательнее! ⚠️"
         )
-    
-    # ОБНОВЛЯЕМ СООБЩЕНИЕ А НЕ ОТПРАВЛЯЕМ НОВОЕ
-    try:
-        await callback.message.edit_text(
-            result_text,
-            parse_mode="Markdown",
-            reply_markup=get_asphalt_keyboard(False)
+        
+        await callback.message.answer(result_text, parse_mode="Markdown")
+        
+        # Обновляем меню
+        new_menu_text = (
+            f"🛣️ *Укладка асфальта*\n\n"
+            f"💰 Твой баланс: {user['balance']}₽\n"
+            f"📏 Уложено метров: {user.get('asphalt_meters', 0)}\n"
+            f"💵 Заработано на асфальте: {user.get('asphalt_earned', 0)}₽\n\n"
+            f"⏳ Асфальт еще сохнет!\nПодожди 30 секунд."
         )
-    except:
-        await callback.message.answer(
-            result_text,
-            parse_mode="Markdown",
-            reply_markup=get_asphalt_keyboard(False)
-        )
+        
+        try:
+            await callback.message.edit_text(
+                new_menu_text,
+                parse_mode="Markdown",
+                reply_markup=get_asphalt_keyboard(False)
+            )
+        except:
+            await callback.message.answer(
+                new_menu_text,
+                parse_mode="Markdown",
+                reply_markup=get_asphalt_keyboard(False)
+            )
     
     await callback.answer()
 
@@ -813,20 +857,37 @@ async def handle_asphalt_wait(callback: CallbackQuery):
     user = await get_user(user_id)
     
     if not user:
-        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+        await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
     
-    last_asphalt = user.get('last_asphalt')
-    if last_asphalt:
-        last_asphalt_time = datetime.fromisoformat(last_asphalt)
-        time_since_last = datetime.now() - last_asphalt_time
-        min_wait = timedelta(seconds=30)
+    if user.get('last_asphalt'):
+        last_time = datetime.fromisoformat(user['last_asphalt'])
+        time_passed = (datetime.now() - last_time).total_seconds()
         
-        if time_since_last < min_wait:
-            wait_time = int((min_wait - time_since_last).total_seconds())
+        if time_passed < 30:
+            wait_time = 30 - int(time_passed)
             await callback.answer(f"⏳ Подожди еще {wait_time} секунд!", show_alert=True)
         else:
             await callback.answer("✅ Асфальт высох, можно укладывать!", show_alert=True)
+            
+            # Обновляем меню
+            asphalt_text = (
+                f"🛣️ *Укладка асфальта*\n\n"
+                f"💰 Твой баланс: {user['balance']}₽\n"
+                f"📏 Уложено метров: {user.get('asphalt_meters', 0)}\n"
+                f"💵 Заработано на асфальте: {user.get('asphalt_earned', 0)}₽\n\n"
+                f"Нажми кнопку ниже, чтобы уложить 1 метр асфальта!\n"
+                f"⏱️ Перерыв между укладкой: 30 секунд"
+            )
+            
+            try:
+                await callback.message.edit_text(
+                    asphalt_text,
+                    parse_mode="Markdown",
+                    reply_markup=get_asphalt_keyboard(True)
+                )
+            except:
+                pass
     else:
         await callback.answer("✅ Можно начинать укладку!", show_alert=True)
 
