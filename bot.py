@@ -1,5 +1,5 @@
 """
-Telegram бот "Виталик Штрафующий" - ПОЛНАЯ ВЕРСИЯ С СИСТЕМОЙ ЧЕКОВ
+Telegram бот "Виталик Штрафующий" - ПОЛНАЯ ВЕРСИЯ С СИСТЕМОЙ ЧЕКОВ И ИСПРАВЛЕННЫМ НАГИРТОМ
 """
 
 import asyncio
@@ -212,7 +212,7 @@ async def get_all_users() -> List[Dict[str, Any]]:
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
-# ==================== СИСТЕМА НАГИРТА ====================
+# ==================== СИСТЕМА НАГИРТА (ИСПРАВЛЕННАЯ) ====================
 async def add_nagirt_pill(user_id: int, pill_type: str, effect: float, hours: int, side_effects: str = ""):
     expires_at = datetime.now() + timedelta(hours=hours)
     async with aiosqlite.connect(DB_NAME) as db:
@@ -235,19 +235,41 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
         "salary_boost": 0.0,
         "asphalt_boost": 0.0,
         "side_effects": [],
-        "has_active": len(rows) > 0
+        "has_active": len(rows) > 0,
+        "risk_multiplier": 1.0
     }
     
     for row in rows:
-        pill_type, strength, side_effects = row
-        if pill_type in ["nagirt_pro", "nagirt_extreme"]:
+        pill_type, strength, side_effects_json = row
+        
+        # Разные таблетки дают разные эффекты
+        if pill_type == "nagirt_extreme":
+            effects["salary_boost"] += strength * 1.5
+            effects["asphalt_boost"] += strength * 1.2
+            effects["risk_multiplier"] += 0.8
+        elif pill_type == "nagirt_pro":
             effects["salary_boost"] += strength
-            effects["asphalt_boost"] += strength
+            effects["asphalt_boost"] += strength * 0.8
+            effects["risk_multiplier"] += 0.5
         elif pill_type == "nagirt_light":
             effects["asphalt_boost"] += strength
+            effects["salary_boost"] += strength * 0.3
+            effects["risk_multiplier"] += 0.2
         
-        if side_effects:
-            effects["side_effects"].append(side_effects)
+        # Парсим побочные эффекты
+        if side_effects_json:
+            try:
+                side_effects = json.loads(side_effects_json)
+                if isinstance(side_effects, list):
+                    effects["side_effects"].extend(side_effects)
+                    # Каждая побочка увеличивает риск
+                    effects["risk_multiplier"] += len(side_effects) * 0.1
+                else:
+                    effects["side_effects"].append(side_effects)
+                    effects["risk_multiplier"] += 0.1
+            except:
+                effects["side_effects"].append(side_effects_json)
+                effects["risk_multiplier"] += 0.1
     
     return effects
 
@@ -360,7 +382,8 @@ def get_main_keyboard(user_id: int = None) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="💰 Получка"), KeyboardButton(text="🛒 Магазин")],
         [KeyboardButton(text="🔁 Перевод"), KeyboardButton(text="🎮 Мини-игры")],
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💊 Эффекты")]
+        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💊 Толерантность")],
+        [KeyboardButton(text="⚡ Эффекты")]
     ]
     if user_id == ADMIN_ID:
         keyboard.append([KeyboardButton(text="👑 Админ-панель")])
@@ -813,7 +836,7 @@ async def handle_check_activation(message: Message, check_id: str):
     
     await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
-# Продолжение основных обработчиков...
+# ==================== ПОЛУЧКА С ИСПРАВЛЕННЫМ НАГИРТОМ ====================
 @dp.message(F.text == "💰 Получка")
 async def handle_paycheck(message: Message):
     user_id = message.from_user.id
@@ -841,24 +864,57 @@ async def handle_paycheck(message: Message):
     
     boost_multiplier = await get_active_boosts(user_id)
     nagirt_effects = await get_active_nagirt_effects(user_id)
+    tolerance = await get_nagirt_tolerance(user_id)
     
     base_salary = random.randint(
         ECONOMY_SETTINGS["salary_min"], 
         ECONOMY_SETTINGS["salary_max"]
     )
     
+    # РАСШИРЕННАЯ СИСТЕМА ШТРАФОВ ЗА НАГИРТ
     pill_fine = 0
-    if nagirt_effects["has_active"] and random.random() <= ECONOMY_SETTINGS["fine_chance"]:
-        pill_fine = random.randint(
-            int(base_salary * 0.1),
-            int(base_salary * 0.3)
-        )
-        fine_reasons = [
-            "Обнаружены следы Нагирта в крови!",
-            "Работа в состоянии измененного сознания!",
-            "Нарушение техники безопасности из-за таблеток!"
-        ]
-        await update_balance(user_id, -pill_fine, "penalty", f"💊 {random.choice(fine_reasons)}")
+    base_fine_chance = ECONOMY_SETTINGS["fine_chance"]  # 25%
+    
+    if nagirt_effects["has_active"]:
+        # Увеличиваем шанс штрафа в зависимости от силы нагирта и побочек
+        nagirt_fine_chance = base_fine_chance * nagirt_effects["risk_multiplier"]
+        
+        # Дополнительный риск за высокую толерантность
+        if tolerance > 1.5:
+            nagirt_fine_chance *= 1.5
+        elif tolerance > 1.2:
+            nagirt_fine_chance *= 1.2
+        
+        # Каждая побочка увеличивает шанс
+        if nagirt_effects["side_effects"]:
+            nagirt_fine_chance += len(nagirt_effects["side_effects"]) * 0.15
+        
+        total_fine_chance = min(0.9, nagirt_fine_chance)  # Макс 90%
+        
+        if random.random() <= total_fine_chance:
+            # Размер штрафа зависит от силы нагирта и побочек
+            penalty_multiplier = 1.0 + (nagirt_effects["risk_multiplier"] - 1) * 0.5
+            pill_fine = random.randint(
+                int(base_salary * 0.15 * penalty_multiplier),
+                int(base_salary * 0.4 * penalty_multiplier)
+            )
+            
+            fine_reasons = [
+                "Обнаружены следы Нагирта в крови при медосмотре!",
+                "Работа в состоянии измененного сознания!",
+                "Нарушение техники безопасности из-за таблеток!",
+                "Неадекватное поведение на рабочем месте!",
+                "Потеря концентрации из-за побочных эффектов!"
+            ]
+            
+            if nagirt_effects["side_effects"]:
+                fine_reasons.append(f"Медосмотр выявил: {', '.join(nagirt_effects['side_effects'][:2])}!")
+            
+            if tolerance > 1.5:
+                fine_reasons.append(f"Злоупотребление Нагиртом! Толерантность: +{int((tolerance-1)*100)}%")
+            
+            await update_balance(user_id, -pill_fine, "penalty", 
+                                f"💊 {random.choice(fine_reasons)}")
     
     total_multiplier = 1.0 + boost_multiplier + nagirt_effects["salary_boost"]
     final_salary = int(base_salary * total_multiplier)
@@ -903,13 +959,25 @@ async def handle_paycheck(message: Message):
         comments = ["Нормально работаешь.", "Продолжай в том же духе.", "Стабильно, но можно лучше."]
     
     if nagirt_effects["has_active"]:
-        pill_comments = ["Таблетки не заменят профессионализм!", "Осторожнее с Нагиртом!", "Лекарства должны помогать, а не мешать работе!"]
+        if pill_fine > 0:
+            pill_comments = [
+                "Таблетки — не замена профессионализму!",
+                "Осторожнее с Нагиртом!",
+                "Лекарства должны помогать, а не мешать работе!"
+            ]
+        else:
+            pill_comments = [
+                "Нагирт работает, но будь осторожен!",
+                "Таблетки усилили твою продуктивность!",
+                "Не злоупотребляй Нагиртом!"
+            ]
         response += f"💬 *Виталик:* '{random.choice(pill_comments)}'"
     else:
         response += f"💬 *Виталик:* '{random.choice(comments)}'"
     
     await message.answer(response, parse_mode="Markdown")
 
+# ==================== МАГАЗИН ====================
 @dp.message(F.text == "🛒 Магазин")
 async def handle_shop(message: Message):
     user_id = message.from_user.id
@@ -944,6 +1012,7 @@ async def handle_shop(message: Message):
     
     await message.answer(shop_text, parse_mode="Markdown", reply_markup=get_shop_keyboard())
 
+# ==================== ПОКУПКА ТОВАРОВ С ИСПРАВЛЕННЫМ НАГИРТОМ ====================
 @dp.callback_query(F.data.startswith("buy_"))
 async def handle_buy_item(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -1017,19 +1086,49 @@ async def handle_buy_item(callback: CallbackQuery):
         tolerance = await get_nagirt_tolerance(user_id)
         real_effect = item["effect"] / tolerance
         
-        side_effects = ""
-        if random.randint(1, 100) <= item.get("side_effect_chance", 0):
-            side_effects = random.choice(["Головокружение", "Тошнота", "Слабость", "Дрожь в руках", "Нарушение координации"])
+        # ГЕНЕРАЦИЯ НЕСКОЛЬКИХ ПОБОЧНЫХ ЭФФЕКТОВ
+        side_effects_list = []
+        side_effect_chance = item.get("side_effect_chance", 0)
         
-        await add_nagirt_pill(user_id, item["id"], real_effect, item["hours"], side_effects)
-        await update_nagirt_tolerance(user_id)
+        if random.randint(1, 100) <= side_effect_chance:
+            side_effects_pool = [
+                "Тошнота", "Головокружение", "Дрожь в руках", "Нарушение координации",
+                "Слабость", "Спутанность сознания", "Повышенное давление", "Тахикардия",
+                "Нарушение зрения", "Сухость во рту", "Бессонница", "Тревожность"
+            ]
+            # От 1 до 3 побочек в зависимости от силы таблетки
+            num_effects = 1
+            if item["id"] == "nagirt_pro":
+                num_effects = random.randint(1, 2)
+            elif item["id"] == "nagirt_extreme":
+                num_effects = random.randint(2, 3)
+            
+            side_effects_list = random.sample(side_effects_pool, min(num_effects, len(side_effects_pool)))
+        
+        side_effects_json = json.dumps(side_effects_list, ensure_ascii=False)
+        
+        await add_nagirt_pill(user_id, item["id"], real_effect, item["hours"], side_effects_json)
+        
+        # УВЕЛИЧИВАЕМ ТОЛЕРАНТНОСТЬ В ЗАВИСИМОСТИ ОТ СИЛЫ ТАБЛЕТКИ
+        tolerance_increase = 0.1
+        if item["id"] == "nagirt_pro":
+            tolerance_increase = 0.15
+        elif item["id"] == "nagirt_extreme":
+            tolerance_increase = 0.2
+        
+        await update_nagirt_tolerance(user_id, tolerance_increase)
         
         bonus_text = f"💊 Таблетка принята! Эффект: +{int(real_effect*100)}% на {item['hours']}ч"
-        if side_effects:
-            bonus_text += f"\n⚠️ Побочный эффект: {side_effects}"
         
-        if tolerance > 1.2:
+        if side_effects_list:
+            bonus_text += f"\n⚠️ Побочные эффекты: {', '.join(side_effects_list)}"
+        
+        if tolerance > 1.0:
             bonus_text += f"\n📉 Толерантность: +{int((tolerance-1)*100)}% (эффект ослаблен)"
+        
+        # Уведомление о повышенном риске
+        risk_increase = int((item.get("side_effect_chance", 0) / 2))
+        bonus_text += f"\n⚡ Риск штрафа увеличен на {risk_increase}%"
     
     elif item.get("type") == "antidote":
         await reset_nagirt_tolerance(user_id)
@@ -1246,7 +1345,7 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
     
     await state.clear()
 
-# ==================== УКЛАДКА АСФАЛЬТА С НАГИРТОМ ====================
+# ==================== УКЛАДКА АСФАЛЬТА С ИСПРАВЛЕННЫМ НАГИРТОМ ====================
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     """Меню укладки асфальта с отображением эффектов Нагирта"""
@@ -1337,19 +1436,24 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         except:
             pass  # Если ошибка, продолжаем
     
-    # Определяем успех или штраф (70% успеха, но нагирт может влиять)
+    # Определяем успех или штраф
     base_success_chance = 0.7
     success_chance = base_success_chance
     
-    # Нагирт может УВЕЛИЧИТЬ шанс успеха или УМЕНЬШИТЬ его из-за побочек
+    # НАГИРТ УВЕЛИЧИВАЕТ ШАНС УСПЕХА
     if nagirt_effects["has_active"]:
-        # Нагирт увеличивает шанс успеха
-        success_chance = min(0.95, base_success_chance + (nagirt_effects["asphalt_boost"] * 0.15))
+        # Базовое увеличение шанса
+        success_chance = min(0.95, base_success_chance + (nagirt_effects["asphalt_boost"] * 0.25))
         
-        # Но побочные эффекты МОГУТ уменьшить шанс
+        # Побочки СНИЖАЮТ шанс значительно
         if nagirt_effects["side_effects"]:
-            # Каждый побочный эффект снижает шанс на 5%
-            success_chance = max(0.3, success_chance - (len(nagirt_effects["side_effects"]) * 0.05))
+            for effect in nagirt_effects["side_effects"]:
+                if effect in ["Нарушение координации", "Дрожь в руках", "Спутанность сознания", "Нарушение зрения"]:
+                    success_chance -= 0.2  # Серьезные побочки
+                else:
+                    success_chance -= 0.08  # Легкие побочки
+        
+        success_chance = max(0.1, success_chance)  # Минимум 10% шанса
     
     success = random.random() <= success_chance
     
@@ -1362,10 +1466,9 @@ async def handle_lay_asphalt(callback: CallbackQuery):
             earnings_multiplier = 1.0 + nagirt_effects["asphalt_boost"]
             earnings = int(base_earnings * earnings_multiplier)
             
-            # Дополнительный бонус за побочные эффекты? Нет, они только ухудшают
-            # Но если нет побочных эффектов, можно дать небольшой бонус
+            # Дополнительный бонус, если нет побочных эффектов
             if not nagirt_effects["side_effects"] and nagirt_effects["asphalt_boost"] > 0:
-                earnings = int(earnings * 1.1)  # +10% если нет побочек
+                earnings = int(earnings * 1.15)  # +15% если нет побочек
         else:
             earnings = base_earnings
         
@@ -1426,20 +1529,23 @@ async def handle_lay_asphalt(callback: CallbackQuery):
             ECONOMY_SETTINGS["asphalt_fine_max"]
         )
         
-        # Нагирт может УВЕЛИЧИТЬ штраф из-за побочных эффектов
-        if nagirt_effects["has_active"] and nagirt_effects["side_effects"]:
-            # Каждый побочный эффект увеличивает штраф на 20%
-            penalty_multiplier = 1.0 + (len(nagirt_effects["side_effects"]) * 0.2)
+        # НАГИРТ УВЕЛИЧИВАЕТ ШТРАФ
+        if nagirt_effects["has_active"]:
+            penalty_multiplier = 1.0 + (nagirt_effects["risk_multiplier"] - 1) * 0.7
+            
+            # Побочные эффекты значительно увеличивают штраф
+            if nagirt_effects["side_effects"]:
+                for effect in nagirt_effects["side_effects"]:
+                    if effect in ["Нарушение координации", "Дрожь в руках", "Спутанность сознания"]:
+                        penalty_multiplier += 0.3
+                    else:
+                        penalty_multiplier += 0.1
+            
             penalty = int(base_penalty * penalty_multiplier)
-            penalty_reason = f"Штраф за плохую укладку + побочки Нагирта"
+            penalty_reason = f"Штраф за плохую укладку" + (" + Нагирт" if nagirt_effects["has_active"] else "")
         else:
             penalty = base_penalty
             penalty_reason = "Штраф за плохую укладку"
-        
-        # Но если есть нагирт без побочек, можно смягчить штраф
-        if nagirt_effects["has_active"] and not nagirt_effects["side_effects"]:
-            penalty = max(ECONOMY_SETTINGS["asphalt_fine_min"], int(penalty * 0.7))
-            penalty_reason = "Штраф смягчен (Нагирт без побочек)"
         
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute('''
@@ -1466,7 +1572,7 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         )
         
         if nagirt_effects["has_active"]:
-            result_text += f"💊 *Влияние Нагирта:* {int((success_chance - base_success_chance)*100)}% к шансу\n"
+            result_text += f"💊 *Влияние Нагирта:* Шанс успеха {int(success_chance*100)}% (обычно 70%)\n"
         
         result_text += (
             f"💸 Штраф: {format_money(penalty)}\n"
@@ -1537,6 +1643,92 @@ async def handle_asphalt_wait(callback: CallbackQuery):
             await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
     else:
         await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
+
+# ==================== ТОЛЕРАНТНОСТЬ К НАГИРТУ ====================
+@dp.message(F.text == "💊 Толерантность")
+async def handle_tolerance(message: Message):
+    user_id = message.from_user.id
+    tolerance = await get_nagirt_tolerance(user_id)
+    nagirt_effects = await get_active_nagirt_effects(user_id)
+    
+    tolerance_text = f"📊 *ТОЛЕРАНТНОСТЬ К НАГИРТУ*\n\n"
+    
+    if tolerance <= 1.1:
+        tolerance_text += f"Уровень: 🟢 Низкий ({tolerance:.2f}x)\n"
+        tolerance_text += "✅ Эффект таблеток максимальный\n"
+        tolerance_text += "⚡ Риск штрафов: нормальный\n"
+    elif tolerance <= 1.5:
+        tolerance_text += f"Уровень: 🟡 Средний ({tolerance:.2f}x)\n"
+        tolerance_text += f"⚠️ Эффект ослаблен на {int((tolerance-1)*100)}%\n"
+        tolerance_text += "⚡ Риск штрафов: повышенный\n"
+    elif tolerance <= 2.0:
+        tolerance_text += f"Уровень: 🟠 Высокий ({tolerance:.2f}x)\n"
+        tolerance_text += f"❌ Эффект ослаблен на {int((tolerance-1)*100)}%\n"
+        tolerance_text += "🔥 Риск штрафов: очень высокий\n"
+    else:
+        tolerance_text += f"Уровень: 🔴 Критический ({tolerance:.2f}x)\n"
+        tolerance_text += f"💀 Эффект ослаблен на {int((tolerance-1)*100)}%\n"
+        tolerance_text += "🚨 Риск увольнения за злоупотребление!\n"
+    
+    if nagirt_effects["has_active"]:
+        tolerance_text += f"\n💊 *Активные таблетки:* +{int(nagirt_effects['salary_boost']*100)}%\n"
+        if nagirt_effects["side_effects"]:
+            tolerance_text += f"⚠️ Побочные эффекты: {', '.join(nagirt_effects['side_effects'][:3])}\n"
+    
+    tolerance_text += "\n📈 *Как снизить толерантность:*\n"
+    tolerance_text += "• Используйте 💉 Антидот (2500₽)\n"
+    tolerance_text += "• Не принимайте таблетки 24 часа\n"
+    tolerance_text += "• Чередуйте разные типы Нагирта\n"
+    tolerance_text += "• Используйте более слабые таблетки\n\n"
+    
+    tolerance_text += "⚠️ *Предупреждение:* Высокая толерантность увеличивает риск штрафов и уменьшает эффект таблеток!"
+    
+    await message.answer(tolerance_text, parse_mode="Markdown")
+
+# ==================== ЭФФЕКТЫ ====================
+@dp.message(F.text == "⚡ Эффекты")
+async def handle_effects(message: Message):
+    user_id = message.from_user.id
+    
+    effects = await get_active_nagirt_effects(user_id)
+    tolerance = await get_nagirt_tolerance(user_id)
+    boosts = await get_active_boosts(user_id)
+    
+    effects_text = "⚡ *АКТИВНЫЕ ЭФФЕКТЫ*\n\n"
+    
+    if boosts > 0:
+        effects_text += f"📈 *Бусты к зарплате:* +{int(boosts*100)}%\n\n"
+    else:
+        effects_text += "📈 *Бусты к зарплате:* нет\n\n"
+    
+    if effects["has_active"]:
+        effects_text += "💊 *Таблетки Нагирт:*\n"
+        
+        if effects["salary_boost"] > 0:
+            effects_text += f"• Зарплата: +{int(effects['salary_boost']*100)}%\n"
+            effects_text += f"  ⚠️ Риск штрафа: +{int((effects['risk_multiplier']-1)*100)}%\n"
+        
+        if effects["asphalt_boost"] > 0:
+            effects_text += f"• Мини-игры: +{int(effects['asphalt_boost']*100)}%\n"
+        
+        if effects["side_effects"]:
+            effects_text += "\n⚠️ *Побочные эффекты:*\n"
+            for effect in effects["side_effects"]:
+                effects_text += f"• {effect}\n"
+        
+        effects_text += "\n"
+    else:
+        effects_text += "💊 *Таблетки Нагирт:* нет\n\n"
+    
+    effects_text += f"📊 *Толерантность к Нагирту:* x{tolerance:.2f}\n"
+    
+    if tolerance > 1.5:
+        effects_text += "\n🚨 *ВНИМАНИЕ!* Высокая толерантность!\n"
+        effects_text += "Эффект таблеток слабеет. Рекомендуется использовать антидот.\n"
+    elif tolerance > 1.2:
+        effects_text += "\n⚠️ *Предупреждение:* Толерантность повышена.\n"
+    
+    await message.answer(effects_text, parse_mode="Markdown")
 
 # ==================== ПЕРЕВОДЫ ====================
 @dp.message(F.text == "🔁 Перевод")
@@ -1685,6 +1877,54 @@ async def handle_transfer_amount(message: Message, state: FSMContext):
         return
     
     await state.clear()
+
+# ==================== СТАТИСТИКА ====================
+@dp.message(F.text == "📊 Статистика")
+async def handle_statistics(message: Message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь через /start")
+        return
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT full_name, balance, total_earned, asphalt_meters FROM players ORDER BY balance DESC LIMIT 10"
+        )
+        top_players = await cursor.fetchall()
+        
+        cursor = await db.execute("SELECT COUNT(*) as total, SUM(balance) as total_balance FROM players")
+        total_stats = await cursor.fetchone()
+    
+    stats_text = (
+        f"📊 *КОРПОРАТИВНАЯ СТАТИСТИКА*\n\n"
+        f"👤 *Ваш профиль:*\n"
+        f"• Имя: {user['full_name']}\n"
+        f"• Баланс: {format_money(user['balance'])}\n"
+        f"• Заработано всего: {format_money(user.get('total_earned', 0))}\n"
+        f"• Штрафов получено: {format_money(user.get('total_fines', 0))}\n"
+        f"• Получок: {user.get('salary_count', 0)}\n"
+        f"• Уложено асфальта: {user.get('asphalt_meters', 0):,} метров\n"
+        f"• Заработано на асфальте: {format_money(user.get('asphalt_earned', 0))}\n\n"
+    )
+    
+    if total_stats:
+        stats_text += (
+            f"🏢 *Общая статистика:*\n"
+            f"• Всего сотрудников: {total_stats['total']}\n"
+            f"• Общий капитал: {format_money(total_stats['total_balance'] or 0)}\n\n"
+        )
+    
+    if top_players:
+        stats_text += "🏆 *ТОП-10 СОТРУДНИКОВ:*\n"
+        for i, player in enumerate(top_players, 1):
+            medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][i-1]
+            name = player['full_name'][:15] + "..." if len(player['full_name']) > 15 else player['full_name']
+            stats_text += f"{medel} {name}: {format_money(player['balance'])}\n"
+    
+    await message.answer(stats_text, parse_mode="Markdown")
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 @dp.message(F.text == "👑 Админ-панель")
@@ -2513,99 +2753,6 @@ async def handle_admin_back(callback: CallbackQuery):
         reply_markup=get_admin_keyboard()
     )
     await callback.answer()
-
-# ==================== СТАТИСТИКА ====================
-@dp.message(F.text == "📊 Статистика")
-async def handle_statistics(message: Message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    
-    if not user:
-        await message.answer("Сначала зарегистрируйтесь через /start")
-        return
-    
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT full_name, balance, total_earned, asphalt_meters FROM players ORDER BY balance DESC LIMIT 10"
-        )
-        top_players = await cursor.fetchall()
-        
-        cursor = await db.execute("SELECT COUNT(*) as total, SUM(balance) as total_balance FROM players")
-        total_stats = await cursor.fetchone()
-    
-    stats_text = (
-        f"📊 *КОРПОРАТИВНАЯ СТАТИСТИКА*\n\n"
-        f"👤 *Ваш профиль:*\n"
-        f"• Имя: {user['full_name']}\n"
-        f"• Баланс: {format_money(user['balance'])}\n"
-        f"• Заработано всего: {format_money(user.get('total_earned', 0))}\n"
-        f"• Штрафов получено: {format_money(user.get('total_fines', 0))}\n"
-        f"• Получок: {user.get('salary_count', 0)}\n"
-        f"• Уложено асфальта: {user.get('asphalt_meters', 0):,} метров\n"
-        f"• Заработано на асфальте: {format_money(user.get('asphalt_earned', 0))}\n\n"
-    )
-    
-    if total_stats:
-        stats_text += (
-            f"🏢 *Общая статистика:*\n"
-            f"• Всего сотрудников: {total_stats['total']}\n"
-            f"• Общий капитал: {format_money(total_stats['total_balance'] or 0)}\n\n"
-        )
-    
-    if top_players:
-        stats_text += "🏆 *ТОП-10 СОТРУДНИКОВ:*\n"
-        for i, player in enumerate(top_players, 1):
-            medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][i-1]
-            name = player['full_name'][:15] + "..." if len(player['full_name']) > 15 else player['full_name']
-            stats_text += f"{medal} {name}: {format_money(player['balance'])}\n"
-    
-    await message.answer(stats_text, parse_mode="Markdown")
-
-# ==================== ЭФФЕКТЫ ====================
-@dp.message(F.text == "💊 Эффекты")
-async def handle_effects(message: Message):
-    user_id = message.from_user.id
-    
-    effects = await get_active_nagirt_effects(user_id)
-    tolerance = await get_nagirt_tolerance(user_id)
-    boosts = await get_active_boosts(user_id)
-    
-    effects_text = "⚡ *АКТИВНЫЕ ЭФФЕКТЫ*\n\n"
-    
-    if boosts > 0:
-        effects_text += f"📈 *Бусты к зарплате:* +{int(boosts*100)}%\n\n"
-    else:
-        effects_text += "📈 *Бусты к зарплате:* нет\n\n"
-    
-    if effects["has_active"]:
-        effects_text += "💊 *Таблетки Нагирт:*\n"
-        
-        if effects["salary_boost"] > 0:
-            effects_text += f"• Зарплата: +{int(effects['salary_boost']*100)}%\n"
-            effects_text += f"  ⚠️ Риск штрафа: {ECONOMY_SETTINGS['fine_chance']*100}%\n"
-        
-        if effects["asphalt_boost"] > 0:
-            effects_text += f"• Мини-игры: +{int(effects['asphalt_boost']*100)}%\n"
-        
-        if effects["side_effects"]:
-            effects_text += "\n⚠️ *Побочные эффекты:*\n"
-            for effect in effects["side_effects"]:
-                effects_text += f"• {effect}\n"
-        
-        effects_text += "\n"
-    else:
-        effects_text += "💊 *Таблетки Нагирт:* нет\n\n"
-    
-    effects_text += f"📊 *Толерантность к Нагирту:* +{int((tolerance-1)*100)}%\n"
-    
-    if tolerance > 1.5:
-        effects_text += "\n🚨 *ВНИМАНИЕ!* Высокая толерантность!\n"
-        effects_text += "Эффект таблеток слабеет. Рекомендуется использовать антидот.\n"
-    elif tolerance > 1.2:
-        effects_text += "\n⚠️ *Предупреждение:* Толерантность повышена.\n"
-    
-    await message.answer(effects_text, parse_mode="Markdown")
 
 # ==================== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ====================
 @dp.callback_query(F.data == "back_to_main")
