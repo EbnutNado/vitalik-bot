@@ -1,5 +1,5 @@
 """
-Telegram бот "Виталик Штрафующий" - РАБОЧАЯ ВЕРСИЯ
+Telegram бот "Виталик Штрафующий" - ИСПРАВЛЕННАЯ ВЕРСИЯ
 Укладка асфальта и рулетка РАБОТАЮТ
 """
 
@@ -22,7 +22,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import aiosqlite
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"  # !!! ЗАМЕНИТЕ НА ВАШ ТОКЕН !!!
+BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
 ADMIN_ID = 5775839902  # Твой ID
 
 logging.basicConfig(level=logging.INFO)
@@ -723,8 +723,172 @@ async def handle_buy_item(callback: CallbackQuery):
     
     await callback.answer()
 
-# ==================== УКЛАДКА АСФАЛЬТА (РАБОЧАЯ ПРОСТАЯ ВЕРСИЯ) ====================
-# ==================== УКЛАДКА АСФАЛЬТА С НАГИРТОМ (ИСПРАВЛЕННАЯ) ====================
+# ==================== МИНИ-ИГРЫ ====================
+@dp.message(F.text == "🎮 Мини-игры")
+async def handle_minigames(message: Message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь через /start")
+        return
+    
+    games_text = (
+        "🎮 *КОРПОРАТИВНЫЕ МИНИ-ИГРЫ*\n\n"
+        "🎰 *Рулетка*\n"
+        f"• Минимальная ставка: {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}\n"
+        f"• Шанс выигрыша: {int(ECONOMY_SETTINGS['roulette_win_chance']*100)}%\n"
+        f"• Выигрыш: x2 от ставки\n\n"
+        "🛣️ *Укладка асфальта*\n"
+        f"• Заработок за метр: {format_money(ECONOMY_SETTINGS['asphalt_earnings'])}\n"
+        f"• Штраф за брак: {format_money(ECONOMY_SETTINGS['asphalt_fine_min'])}-{format_money(ECONOMY_SETTINGS['asphalt_fine_max'])}\n"
+        f"• Шанс успеха: 70% (с Нагиртом до 95%)\n"
+        f"• Время работы: 30 секунд\n\n"
+        f"💰 Ваш баланс: {format_money(user['balance'])}"
+    )
+    
+    await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
+
+# ==================== РУЛЕТКА ====================
+@dp.callback_query(F.data == "game_roulette")
+async def handle_game_roulette_start(callback: CallbackQuery, state: FSMContext):
+    """Начало игры в рулетку"""
+    user_id = callback.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
+        return
+    
+    roulette_text = (
+        f"🎰 *РУЛЕТКА*\n\n"
+        f"💰 Ваш баланс: {format_money(user['balance'])}\n"
+        f"🎯 Шанс выигрыша: {int(ECONOMY_SETTINGS['roulette_win_chance']*100)}%\n"
+        f"💰 Выигрыш: x2 от ставки\n\n"
+        f"💸 *Введите сумму ставки:*\n"
+        f"Минимум: {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}\n"
+        f"Максимум: {format_money(min(ECONOMY_SETTINGS['roulette_max_bet'], user['balance']))}"
+    )
+    
+    await callback.message.edit_text(roulette_text, parse_mode="Markdown")
+    
+    # Сохраняем данные для состояния
+    await state.update_data(user_id=user_id, user_balance=user['balance'])
+    await state.set_state(RouletteStates.waiting_for_bet)
+    await callback.answer()
+
+@dp.message(RouletteStates.waiting_for_bet)
+async def handle_roulette_bet(message: Message, state: FSMContext):
+    """Обработка ставки в рулетке - ИСПРАВЛЕНО"""
+    user_id = message.from_user.id
+    data = await state.get_data()
+    
+    # Проверяем, тот ли пользователь
+    if data.get('user_id') != user_id:
+        await message.answer("❌ Ошибка сессии")
+        await state.clear()
+        return
+    
+    try:
+        bet = int(message.text.strip())
+        user = await get_user(user_id)
+        
+        if not user:
+            await message.answer("❌ Пользователь не найден")
+            await state.clear()
+            return
+        
+        # Проверка минимальной ставки
+        if bet < ECONOMY_SETTINGS["roulette_min_bet"]:
+            await message.answer(f"❌ Минимальная ставка - {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}")
+            return
+        
+        # Проверка максимальной ставки
+        if bet > ECONOMY_SETTINGS["roulette_max_bet"]:
+            await message.answer(f"❌ Максимальная ставка - {format_money(ECONOMY_SETTINGS['roulette_max_bet'])}")
+            return
+        
+        # Проверка баланса
+        if bet > user['balance']:
+            await message.answer(f"❌ Недостаточно средств! Доступно: {format_money(user['balance'])}")
+            return
+        
+        # Играем в рулетку
+        win = random.random() <= ECONOMY_SETTINGS["roulette_win_chance"]
+        
+        if win:
+            # ВЫИГРЫШ
+            win_amount = bet * 2  # x2 от ставки
+            net_profit = bet  # Чистая прибыль (ставка уже включена в win_amount)
+            
+            async with aiosqlite.connect(DB_NAME) as db:
+                # Добавляем чистый выигрыш (ставка уже есть у пользователя)
+                await db.execute(
+                    "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                    (bet, user_id)  # Добавляем только выигрыш, ставка остается
+                )
+                
+                # Записываем транзакцию - ИСПРАВЛЕНО
+                await db.execute(
+                    '''INSERT INTO transactions (user_id, type, amount, description)
+                       VALUES (?, ?, ?, ?)''',
+                    (user_id, 'roulette_win', bet, f"Выигрыш в рулетке: ставка {bet}₽")
+                )
+                
+                await db.commit()
+            
+            user = await get_user(user_id)
+            
+            result_text = (
+                f"🎰 *РУЛЕТКА*\n\n"
+                f"🎉 *ВЫ ВЫИГРАЛИ!*\n\n"
+                f"💰 Ставка: {format_money(bet)}\n"
+                f"🏆 Выигрыш: {format_money(win_amount)}\n"
+                f"💎 Чистая прибыль: {format_money(net_profit)}\n"
+                f"💳 Новый баланс: {format_money(user['balance'])}\n\n"
+                f"Поздравляем! 🎊"
+            )
+        else:
+            # ПРОИГРЫШ
+            async with aiosqlite.connect(DB_NAME) as db:
+                # Списываем ставку
+                await db.execute(
+                    "UPDATE players SET balance = balance - ? WHERE user_id = ?",
+                    (bet, user_id)
+                )
+                
+                # Записываем транзакцию - ИСПРАВЛЕНО
+                await db.execute(
+                    '''INSERT INTO transactions (user_id, type, amount, description)
+                       VALUES (?, ?, ?, ?)''',
+                    (user_id, 'roulette_lose', -bet, f"Проигрыш в рулетке: ставка {bet}₽")
+                )
+                
+                await db.commit()
+            
+            user = await get_user(user_id)
+            
+            result_text = (
+                f"🎰 *РУЛЕТКА*\n\n"
+                f"💥 *ВЫ ПРОИГРАЛИ*\n\n"
+                f"💰 Ставка: {format_money(bet)}\n"
+                f"📉 Потеряно: {format_money(bet)}\n"
+                f"💳 Новый баланс: {format_money(user['balance'])}\n\n"
+                f"Не повезло... 😔"
+            )
+        
+        await message.answer(result_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
+        
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число!")
+        return
+    except Exception as e:
+        logger.error(f"Ошибка в рулетке: {e}")
+        await message.answer("❌ Произошла ошибка, попробуйте еще раз")
+    
+    await state.clear()
+
+# ==================== УКЛАДКА АСФАЛЬТА С НАГИРТОМ ====================
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     """Меню укладки асфальта с отображением эффектов Нагирта"""
@@ -989,118 +1153,6 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         )
     
     await callback.answer()
-
-# ==================== РУЛЕТКА (ИСПРАВЛЕННАЯ ВЕРСИЯ) ====================
-@dp.message(RouletteStates.waiting_for_bet)
-async def handle_roulette_bet(message: Message, state: FSMContext):
-    """Обработка ставки в рулетке - ИСПРАВЛЕНО"""
-    user_id = message.from_user.id
-    data = await state.get_data()
-    
-    # Проверяем, тот ли пользователь
-    if data.get('user_id') != user_id:
-        await message.answer("❌ Ошибка сессии")
-        await state.clear()
-        return
-    
-    try:
-        bet = int(message.text.strip())
-        user = await get_user(user_id)
-        
-        if not user:
-            await message.answer("❌ Пользователь не найден")
-            await state.clear()
-            return
-        
-        # Проверка минимальной ставки
-        if bet < ECONOMY_SETTINGS["roulette_min_bet"]:
-            await message.answer(f"❌ Минимальная ставка - {format_money(ECONOMY_SETTINGS['roulette_min_bet'])}")
-            return
-        
-        # Проверка максимальной ставки
-        if bet > ECONOMY_SETTINGS["roulette_max_bet"]:
-            await message.answer(f"❌ Максимальная ставка - {format_money(ECONOMY_SETTINGS['roulette_max_bet'])}")
-            return
-        
-        # Проверка баланса
-        if bet > user['balance']:
-            await message.answer(f"❌ Недостаточно средств! Доступно: {format_money(user['balance'])}")
-            return
-        
-        # Играем в рулетку
-        win = random.random() <= ECONOMY_SETTINGS["roulette_win_chance"]
-        
-        if win:
-            # ВЫИГРЫШ
-            win_amount = bet * 2  # x2 от ставки
-            net_profit = bet  # Чистая прибыль (ставка уже включена в win_amount)
-            
-            async with aiosqlite.connect(DB_NAME) as db:
-                # Добавляем чистый выигрыш (ставка уже есть у пользователя)
-                await db.execute(
-                    "UPDATE players SET balance = balance + ? WHERE user_id = ?",
-                    (bet, user_id)  # Добавляем только выигрыш, ставка остается
-                )
-                
-                # Записываем транзакцию - ИСПРАВЛЕНО
-                await db.execute(
-                    '''INSERT INTO transactions (user_id, type, amount, description)
-                       VALUES (?, ?, ?, ?)''',
-                    (user_id, 'roulette_win', bet, f"Выигрыш в рулетке: ставка {bet}₽")
-                )
-                
-                await db.commit()
-            
-            user = await get_user(user_id)
-            
-            result_text = (
-                f"🎰 *РУЛЕТКА*\n\n"
-                f"🎉 *ВЫ ВЫИГРАЛИ!*\n\n"
-                f"💰 Ставка: {format_money(bet)}\n"
-                f"🏆 Выигрыш: {format_money(win_amount)}\n"
-                f"💎 Чистая прибыль: {format_money(net_profit)}\n"
-                f"💳 Новый баланс: {format_money(user['balance'])}\n\n"
-                f"Поздравляем! 🎊"
-            )
-        else:
-            # ПРОИГРЫШ
-            async with aiosqlite.connect(DB_NAME) as db:
-                # Списываем ставку
-                await db.execute(
-                    "UPDATE players SET balance = balance - ? WHERE user_id = ?",
-                    (bet, user_id)
-                )
-                
-                # Записываем транзакцию - ИСПРАВЛЕНО
-                await db.execute(
-                    '''INSERT INTO transactions (user_id, type, amount, description)
-                       VALUES (?, ?, ?, ?)''',
-                    (user_id, 'roulette_lose', -bet, f"Проигрыш в рулетке: ставка {bet}₽")
-                )
-                
-                await db.commit()
-            
-            user = await get_user(user_id)
-            
-            result_text = (
-                f"🎰 *РУЛЕТКА*\n\n"
-                f"💥 *ВЫ ПРОИГРАЛИ*\n\n"
-                f"💰 Ставка: {format_money(bet)}\n"
-                f"📉 Потеряно: {format_money(bet)}\n"
-                f"💳 Новый баланс: {format_money(user['balance'])}\n\n"
-                f"Не повезло... 😔"
-            )
-        
-        await message.answer(result_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
-        
-    except ValueError:
-        await message.answer("❌ Пожалуйста, введите число!")
-        return
-    except Exception as e:
-        logger.error(f"Ошибка в рулетке: {e}")
-        await message.answer("❌ Произошла ошибка, попробуйте еще раз")
-    
-    await state.clear()
 
 @dp.callback_query(F.data == "asphalt_wait")
 async def handle_asphalt_wait(callback: CallbackQuery):
