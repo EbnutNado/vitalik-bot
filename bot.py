@@ -1,5 +1,5 @@
 """
-Telegram бот "Виталик Штрафующий" - РАБОЧАЯ ВЕРСИЯ
+Telegram бот "Виталик Штрафующий" - ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 
 import asyncio
@@ -21,7 +21,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import aiosqlite
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
+BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"  # !!! ЗАМЕНИТЕ НА ВАШ ТОКЕН !!!
 ADMIN_ID = 5775839902  # Ваш Telegram ID
 
 # Настройка логирования
@@ -394,22 +394,19 @@ async def handle_shop(message: Message):
         reply_markup=get_shop_keyboard(user['balance'])
     )
 
+# ========== ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ПОКУПКИ ТОВАРОВ ==========
 @dp.callback_query(F.data.startswith("buy_"))
 async def handle_buy_item(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = await get_user(user_id)
     
     if not user:
-        await callback.answer("❌ Пользователь не найден!")
+        await callback.answer("❌ Пользователь не найден!", show_alert=True)
         return
     
-    # Получаем ID товара из callback_data
+    # Получаем ID товара из callback_data (ВОТ ИСПРАВЛЕНИЕ!)
     callback_data = callback.data
-    if "_" not in callback_data:
-        await callback.answer("❌ Ошибка в данных товара!")
-        return
-    
-    item_id = callback.data.split("_")[1]
+    item_id = callback_data[4:]  # Убираем "buy_" из начала строки
     
     # Ищем товар в списке
     item = None
@@ -419,11 +416,11 @@ async def handle_buy_item(callback: CallbackQuery):
             break
     
     if not item:
-        await callback.answer("❌ Товар не найден!")
+        await callback.answer("❌ Товар не найден!", show_alert=True)
         return
     
     if user['balance'] < item['price']:
-        await callback.answer(f"❌ Недостаточно средств! Нужно {item['price']}₽")
+        await callback.answer(f"❌ Недостаточно средств! Нужно {item['price']}₽", show_alert=True)
         return
     
     async with aiosqlite.connect(DB_NAME) as db:
@@ -435,6 +432,7 @@ async def handle_buy_item(callback: CallbackQuery):
         
         # Применяем бонусы
         bonus_applied = random.random() <= item['bonus_chance']
+        bonus_text = "Без дополнительного бонуса"
         
         if item['id'] == 'day_off' and bonus_applied:
             immunity_until = (datetime.now() + timedelta(hours=24)).isoformat()
@@ -457,8 +455,12 @@ async def handle_buy_item(callback: CallbackQuery):
                 (lottery_win, user_id)
             )
             bonus_text = f"Выигрыш в лотерее: {lottery_win}₽!"
-        else:
-            bonus_text = "Без дополнительного бонуса"
+        elif item['id'] == 'insurance' and bonus_applied:
+            await db.execute(
+                "UPDATE players SET penalty_immunity_until = ? WHERE user_id = ?",
+                ((datetime.now() + timedelta(hours=6)).isoformat(), user_id)
+            )
+            bonus_text = "Страховка активирована на 6 часов!"
         
         # Записываем покупку
         await db.execute(
@@ -491,7 +493,11 @@ async def handle_buy_item(callback: CallbackQuery):
     
     response += f"\nУдачной покупки! 🛒"
     
-    await callback.message.edit_text(response, parse_mode="Markdown")
+    try:
+        await callback.message.edit_text(response, parse_mode="Markdown", reply_markup=get_shop_keyboard(user['balance']))
+    except:
+        await callback.message.answer(response, parse_mode="Markdown", reply_markup=get_shop_keyboard(user['balance']))
+    
     await callback.answer()
 
 @dp.callback_query(F.data == "check_balance")
@@ -502,7 +508,7 @@ async def handle_check_balance(callback: CallbackQuery):
     if user:
         await callback.answer(f"💰 Ваш баланс: {user['balance']}₽", show_alert=True)
     else:
-        await callback.answer("Ошибка: пользователь не найден")
+        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
 
 @dp.callback_query(F.data == "back_to_main")
 async def handle_back_to_main(callback: CallbackQuery):
@@ -548,14 +554,14 @@ async def handle_minigames(message: Message):
     
     await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
 
-# ==================== РУЛЕТКА (С ВВОДОМ СТАВКИ) ====================
+# ==================== РУЛЕТКА ====================
 @dp.callback_query(F.data == "game_roulette")
 async def handle_game_roulette_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user = await get_user(user_id)
     
     if not user:
-        await callback.answer("Ошибка: пользователь не найден")
+        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
         return
     
     await callback.message.edit_text(
@@ -605,7 +611,7 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
                 win_amount = bet * 2
                 await db.execute(
                     "UPDATE players SET balance = balance + ? WHERE user_id = ?",
-                    (win_amount - bet, user_id)
+                    (bet, user_id)  # +bet потому что ставка уже включена
                 )
                 
                 result_text = (
@@ -637,7 +643,7 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
             await db.execute(
                 '''INSERT INTO transactions (user_id, type, amount, description)
                    VALUES (?, 'roulette', ?, ?)''',
-                (user_id, win_amount - bet if win else -bet, 
+                (user_id, bet if win else -bet, 
                  f"Рулетка: {'выигрыш' if win else 'проигрыш'}")
             )
             
@@ -650,14 +656,14 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
-# ==================== УКЛАДКА АСФАЛЬТА (РАБОТАЕТ) ====================
+# ========== ИСПРАВЛЕННАЯ УКЛАДКА АСФАЛЬТА ==========
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = await get_user(user_id)
     
     if not user:
-        await callback.answer("Ошибка: пользователь не найден")
+        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
         return
     
     can_work = True
@@ -692,11 +698,18 @@ async def handle_game_asphalt(callback: CallbackQuery):
             f"💵 Заработано на асфальте: {user.get('asphalt_earned', 0)}₽"
         )
     
-    await callback.message.edit_text(
-        asphalt_text,
-        parse_mode="Markdown",
-        reply_markup=get_asphalt_keyboard(can_work)
-    )
+    try:
+        await callback.message.edit_text(
+            asphalt_text,
+            parse_mode="Markdown",
+            reply_markup=get_asphalt_keyboard(can_work)
+        )
+    except:
+        await callback.message.answer(
+            asphalt_text,
+            parse_mode="Markdown",
+            reply_markup=get_asphalt_keyboard(can_work)
+        )
     await callback.answer()
 
 @dp.callback_query(F.data == "lay_asphalt")
@@ -705,7 +718,7 @@ async def handle_lay_asphalt(callback: CallbackQuery):
     user = await get_user(user_id)
     
     if not user:
-        await callback.answer("Ошибка: пользователь не найден")
+        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
         return
     
     last_asphalt = user.get('last_asphalt')
@@ -778,11 +791,20 @@ async def handle_lay_asphalt(callback: CallbackQuery):
             f"Будь внимательнее! ⚠️"
         )
     
-    await callback.message.edit_text(
-        result_text,
-        parse_mode="Markdown",
-        reply_markup=get_asphalt_keyboard(False)
-    )
+    # ОБНОВЛЯЕМ СООБЩЕНИЕ А НЕ ОТПРАВЛЯЕМ НОВОЕ
+    try:
+        await callback.message.edit_text(
+            result_text,
+            parse_mode="Markdown",
+            reply_markup=get_asphalt_keyboard(False)
+        )
+    except:
+        await callback.message.answer(
+            result_text,
+            parse_mode="Markdown",
+            reply_markup=get_asphalt_keyboard(False)
+        )
+    
     await callback.answer()
 
 @dp.callback_query(F.data == "asphalt_wait")
@@ -791,7 +813,7 @@ async def handle_asphalt_wait(callback: CallbackQuery):
     user = await get_user(user_id)
     
     if not user:
-        await callback.answer("Ошибка: пользователь не найден")
+        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
         return
     
     last_asphalt = user.get('last_asphalt')
@@ -807,6 +829,155 @@ async def handle_asphalt_wait(callback: CallbackQuery):
             await callback.answer("✅ Асфальт высох, можно укладывать!", show_alert=True)
     else:
         await callback.answer("✅ Можно начинать укладку!", show_alert=True)
+
+# ==================== ПЕРЕВОДЫ ДЕНЕГ ====================
+@dp.message(F.text == "🔁 Перевод")
+async def handle_transfer_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь через /start")
+        return
+    
+    all_users = await get_all_users()
+    
+    if len(all_users) <= 1:
+        await message.answer("❌ Нет других пользователей для перевода")
+        return
+    
+    await message.answer(
+        "👥 *Выберите получателя:*\n\n"
+        "Нажмите на пользователя, которому хотите отправить деньги:",
+        parse_mode="Markdown",
+        reply_markup=get_users_keyboard(all_users, user_id)
+    )
+    
+    await state.set_state(TransferStates.choosing_recipient)
+
+@dp.callback_query(F.data.startswith("transfer_to_"), TransferStates.choosing_recipient)
+async def handle_transfer_recipient(callback: CallbackQuery, state: FSMContext):
+    recipient_id = int(callback.data.split("_")[2])
+    
+    await state.update_data(recipient_id=recipient_id)
+    
+    recipient = await get_user(recipient_id)
+    if recipient:
+        await callback.message.edit_text(
+            f"📤 *Перевод пользователю:*\n\n"
+            f"👤 *{recipient['full_name']}*\n"
+            f"💰 Баланс: {recipient['balance']}₽\n\n"
+            f"💸 *Введите сумму перевода:*\n"
+            f"Минимум: 10₽\n"
+            f"Максимум: ваш текущий баланс",
+            parse_mode="Markdown"
+        )
+    
+    await state.set_state(TransferStates.entering_amount)
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_transfer")
+async def handle_cancel_transfer(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Перевод отменен")
+    await callback.answer()
+
+@dp.message(TransferStates.entering_amount)
+async def handle_transfer_amount(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    sender = await get_user(user_id)
+    
+    if not sender:
+        await message.answer("❌ Ошибка: отправитель не найден")
+        await state.clear()
+        return
+    
+    try:
+        amount = int(message.text)
+        
+        if amount < 10:
+            await message.answer("❌ Минимальная сумма перевода - 10₽")
+            return
+        if amount > sender['balance']:
+            await message.answer(f"❌ Недостаточно средств! Ваш баланс: {sender['balance']}₽")
+            return
+        
+        data = await state.get_data()
+        recipient_id = data.get('recipient_id')
+        
+        if not recipient_id:
+            await message.answer("❌ Ошибка: получатель не выбран")
+            await state.clear()
+            return
+        
+        recipient = await get_user(recipient_id)
+        if not recipient:
+            await message.answer("❌ Ошибка: получатель не найден")
+            await state.clear()
+            return
+        
+        # Выполняем перевод
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Списываем у отправителя
+            await db.execute(
+                "UPDATE players SET balance = balance - ? WHERE user_id = ?",
+                (amount, user_id)
+            )
+            
+            # Зачисляем получателю
+            await db.execute(
+                "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                (amount, recipient_id)
+            )
+            
+            # Записываем транзакции
+            await db.execute(
+                '''INSERT INTO transactions (user_id, type, amount, description)
+                   VALUES (?, 'transfer_out', -?, ?)''',
+                (user_id, amount, f"Перевод пользователю {recipient['full_name']}")
+            )
+            
+            await db.execute(
+                '''INSERT INTO transactions (user_id, type, amount, description)
+                   VALUES (?, 'transfer_in', ?, ?)''',
+                (recipient_id, amount, f"Перевод от пользователя {sender['full_name']}")
+            )
+            
+            await db.commit()
+        
+        sender_updated = await get_user(user_id)
+        recipient_updated = await get_user(recipient_id)
+        
+        # Уведомляем отправителя
+        await message.answer(
+            f"✅ *Перевод выполнен успешно!*\n\n"
+            f"📤 Отправлено: *{amount}₽*\n"
+            f"👤 Получатель: *{recipient['full_name']}*\n"
+            f"💰 Ваш баланс: *{sender_updated['balance']}₽*\n\n"
+            f"Спасибо за перевод! 💸",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard()
+        )
+        
+        # Уведомляем получателя
+        try:
+            await bot.send_message(
+                recipient_id,
+                f"💰 *Вы получили перевод!*\n\n"
+                f"📥 Получено: *{amount}₽*\n"
+                f"👤 Отправитель: *{sender['full_name']}*\n"
+                f"💰 Ваш баланс: *{recipient_updated['balance']}₽*\n\n"
+                f"Поздравляем! 🎉",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+        
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число!")
+        return
+    
+    await state.clear()
 
 # ==================== СТАТИСТИКА ====================
 @dp.message(F.text == "📊 Статистика")
