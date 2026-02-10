@@ -1882,49 +1882,121 @@ async def handle_transfer_amount(message: Message, state: FSMContext):
 @dp.message(F.text == "📊 Статистика")
 async def handle_statistics(message: Message):
     user_id = message.from_user.id
-    user = await get_user(user_id)
     
-    if not user:
-        await message.answer("Сначала зарегистрируйтесь через /start")
-        return
+    try:
+        user = await get_user(user_id)
+        
+        if not user:
+            await message.answer("Сначала зарегистрируйтесь через /start")
+            return
+        
+        # Получаем топ игроков
+        async with aiosqlite.connect(DB_NAME) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT full_name, balance, total_earned, asphalt_meters FROM players ORDER BY balance DESC LIMIT 10"
+            )
+            top_players = await cursor.fetchall()
+            
+            # Получаем общую статистику
+            cursor = await db.execute("SELECT COUNT(*) as total, SUM(balance) as total_balance FROM players")
+            total_stats = await cursor.fetchone()
+            
+            # Получаем статистику побочных эффектов
+            cursor = await db.execute("SELECT COUNT(*) as pill_users FROM nagirt_pills WHERE expires_at > ?", 
+                                     (datetime.now().isoformat(),))
+            pill_stats = await cursor.fetchone()
+        
+        # Формируем текст
+        stats_text = (
+            f"📊 *КОРПОРАТИВНАЯ СТАТИСТИКА*\n\n"
+            f"👤 *Ваш профиль:*\n"
+            f"• Имя: {user['full_name']}\n"
+            f"• Баланс: {format_money(user['balance'])}\n"
+            f"• Заработано всего: {format_money(user.get('total_earned', 0))}\n"
+            f"• Штрафов получено: {format_money(user.get('total_fines', 0))}\n"
+            f"• Получок: {user.get('salary_count', 0)}\n"
+            f"• Уложено асфальта: {user.get('asphalt_meters', 0):,} метров\n"
+            f"• Заработано на асфальте: {format_money(user.get('asphalt_earned', 0))}\n\n"
+        )
+        
+        if total_stats:
+            total_balance = total_stats['total_balance'] if total_stats['total_balance'] else 0
+            stats_text += (
+                f"🏢 *Общая статистика:*\n"
+                f"• Всего сотрудников: {total_stats['total']}\n"
+                f"• Общий капитал: {format_money(total_balance)}\n"
+            )
+            
+            if pill_stats and pill_stats['pill_users'] > 0:
+                stats_text += f"• Под Нагиртом: {pill_stats['pill_users']} чел.\n"
+            
+            stats_text += "\n"
+        
+        if top_players:
+            stats_text += "🏆 *ТОП-10 СОТРУДНИКОВ:*\n"
+            for i, player in enumerate(top_players, 1):
+                medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][i-1]
+                name = player['full_name'][:15] + "..." if len(player['full_name']) > 15 else player['full_name']
+                balance = player['balance'] if player['balance'] else 0
+                stats_text += f"{medal} {name}: {format_money(balance)}\n"
+        else:
+            stats_text += "🏆 *Топ игроков пока пуст*\n"
+        
+        # Добавляем информацию о последних транзакциях
+        async with aiosqlite.connect(DB_NAME) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT type, amount, description, created_at FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 5",
+                (user_id,)
+            )
+            recent_tx = await cursor.fetchall()
+        
+        if recent_tx:
+            stats_text += "\n📈 *Последние операции:*\n"
+            for tx in recent_tx:
+                tx_type = tx['type']
+                amount = tx['amount']
+                desc = tx['description'][:20] + "..." if len(tx['description']) > 20 else tx['description']
+                time_str = datetime.fromisoformat(tx['created_at']).strftime("%H:%M")
+                
+                if tx_type in ['salary', 'transfer_in', 'bonus', 'check']:
+                    stats_text += f"🟢 +{format_money(amount)} ({desc}) {time_str}\n"
+                else:
+                    stats_text += f"🔴 {format_money(amount)} ({desc}) {time_str}\n"
+        
+        await message.answer(stats_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в статистике: {e}")
+        await message.answer(f"❌ Ошибка при получении статистики. Попробуйте позже.\n\nОшибка: {str(e)[:50]}")
+
+### 2. **Проверьте наличие всех столбцов в базе данных**
+Убедитесь, что в таблице `players` есть все необходимые столбцы. Вы можете добавить проверку:
+
+```python
+async def check_db_columns():
+    """Проверка наличия всех необходимых столбцов"""
+    required_columns = [
+        'asphalt_meters', 'asphalt_earned', 'total_earned', 
+        'total_fines', 'salary_count'
+    ]
     
     async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT full_name, balance, total_earned, asphalt_meters FROM players ORDER BY balance DESC LIMIT 10"
-        )
-        top_players = await cursor.fetchall()
+        cursor = await db.execute("PRAGMA table_info(players)")
+        columns = await cursor.fetchall()
+        existing_columns = [col[1] for col in columns]
         
-        cursor = await db.execute("SELECT COUNT(*) as total, SUM(balance) as total_balance FROM players")
-        total_stats = await cursor.fetchone()
-    
-    stats_text = (
-        f"📊 *КОРПОРАТИВНАЯ СТАТИСТИКА*\n\n"
-        f"👤 *Ваш профиль:*\n"
-        f"• Имя: {user['full_name']}\n"
-        f"• Баланс: {format_money(user['balance'])}\n"
-        f"• Заработано всего: {format_money(user.get('total_earned', 0))}\n"
-        f"• Штрафов получено: {format_money(user.get('total_fines', 0))}\n"
-        f"• Получок: {user.get('salary_count', 0)}\n"
-        f"• Уложено асфальта: {user.get('asphalt_meters', 0):,} метров\n"
-        f"• Заработано на асфальте: {format_money(user.get('asphalt_earned', 0))}\n\n"
-    )
-    
-    if total_stats:
-        stats_text += (
-            f"🏢 *Общая статистика:*\n"
-            f"• Всего сотрудников: {total_stats['total']}\n"
-            f"• Общий капитал: {format_money(total_stats['total_balance'] or 0)}\n\n"
-        )
-    
-    if top_players:
-        stats_text += "🏆 *ТОП-10 СОТРУДНИКОВ:*\n"
-        for i, player in enumerate(top_players, 1):
-            medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][i-1]
-            name = player['full_name'][:15] + "..." if len(player['full_name']) > 15 else player['full_name']
-            stats_text += f"{medel} {name}: {format_money(player['balance'])}\n"
-    
-    await message.answer(stats_text, parse_mode="Markdown")
+        for col in required_columns:
+            if col not in existing_columns:
+                logger.warning(f"Отсутствует столбец {col} в таблице players")
+                # Добавляем недостающий столбец
+                try:
+                    await db.execute(f"ALTER TABLE players ADD COLUMN {col} INTEGER DEFAULT 0")
+                    await db.commit()
+                    logger.info(f"Добавлен столбец {col}")
+                except Exception as e:
+                    logger.error(f"Не удалось добавить столбец {col}: {e}")
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 @dp.message(F.text == "👑 Админ-панель")
@@ -2882,6 +2954,7 @@ async def cmd_stats(message: Message):
 # ==================== ЗАПУСК БОТА ====================
 async def on_startup():
     await init_db()
+    await check_db_columns()
     
     # Проверяем username бота
     bot_info = await bot.get_me()
