@@ -2762,4 +2762,3 @@ async def penalty_scheduler():
                 ECONOMY_SETTINGS["random_fine_interval_max"]
             )
             await asyncio.sleep(wait_time)
-            
