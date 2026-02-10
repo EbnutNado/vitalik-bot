@@ -360,10 +360,12 @@ async def handle_paycheck(message: Message):
         f"Получил {paycheck_amount}₽? Отлично! 🤣"
     ]
     
+    user = await get_user(user_id)
+    
     response = (
         f"💸 *Получка получена!*\n\n"
         f"📈 Начислено: *{paycheck_amount}₽*\n"
-        f"💰 Новый баланс: *{user['balance'] + paycheck_amount}₽*\n\n"
+        f"💰 Новый баланс: *{user['balance']}₽*\n\n"
         f"{random.choice(jokes)}"
     )
     
@@ -402,7 +404,6 @@ async def handle_buy_item(callback: CallbackQuery):
     user = await get_user(user_id)
     item_id = callback.data.split("_")[1]
     
-    # Ищем товар по ID
     item = None
     for shop_item in SHOP_ITEMS:
         if shop_item['id'] == item_id:
@@ -432,6 +433,32 @@ async def handle_buy_item(callback: CallbackQuery):
                 (immunity_until, user_id)
             )
             bonus_text = "Иммунитет к штрафам на 24 часа!"
+        elif item['id'] == 'premium_boost' and bonus_applied:
+            bonus_text = "Премиум-буст активирован на 3 дня!"
+        elif item['id'] == 'bonus_coin' and bonus_applied:
+            bonus_amount = random.randint(50, 200)
+            await db.execute(
+                "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                (bonus_amount, user_id)
+            )
+            bonus_text = f"Бонус: {bonus_amount}₽!"
+        elif item['id'] == 'insurance' and bonus_applied:
+            bonus_text = "Страховка активирована!"
+        elif item['id'] == 'lottery_ticket' and bonus_applied:
+            lottery_win = random.randint(100, 1000)
+            await db.execute(
+                "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                (lottery_win, user_id)
+            )
+            bonus_text = f"Выигрыш в лотерее: {lottery_win}₽!"
+        elif item['id'] == 'nagiret':
+            effect_type = random.choice(['paycheck_boost', 'penalty_risk'])
+            if effect_type == 'paycheck_boost':
+                boost_value = round(random.uniform(1.3, 1.8), 1)
+                bonus_text = f"Нагирт: повышение получки на {int((boost_value-1)*100)}% на 2 часа!"
+            else:
+                risk_multiplier = round(random.uniform(1.5, 3.0), 1)
+                bonus_text = f"Нагирт: риск штрафа увеличен в {risk_multiplier} раз на 1 час!"
         else:
             bonus_text = "Без дополнительного бонуса"
         
@@ -449,11 +476,13 @@ async def handle_buy_item(callback: CallbackQuery):
         
         await db.commit()
     
+    user = await get_user(user_id)
+    
     response = (
         f"✅ *Покупка успешна!*\n\n"
         f"📦 Товар: *{item['name']}*\n"
         f"💸 Стоимость: *{item['price']}₽*\n"
-        f"💰 Остаток: *{user['balance'] - item['price']}₽*\n"
+        f"💰 Остаток: *{user['balance']}₽*\n"
     )
     
     if bonus_applied:
@@ -513,7 +542,8 @@ async def handle_minigames(message: Message):
         "🎮 *Мини-игры от Виталика!*\n\n"
         "Выбери игру:\n\n"
         "🎰 *Рулетка*\n"
-        "Ставь на цвет!\n\n"
+        "Ставь на цвет!\n"
+        "Шанс выигрыша: 45%\n\n"
         "🛣️ *Укладка асфальта*\n"
         "Уложи 1 метр асфальта и получи 10₽!\n"
         "Перерыв: 30 секунд\n\n"
@@ -522,7 +552,77 @@ async def handle_minigames(message: Message):
     
     await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
 
-# ==================== УКЛАДКА АСФАЛЬТА (ИСПРАВЛЕНА) ====================
+# ==================== РУЛЕТКА (РАБОТАЕТ) ====================
+@dp.callback_query(F.data == "game_roulette")
+async def handle_game_roulette(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await callback.answer("Ошибка: пользователь не найден")
+        return
+    
+    bet = 50
+    
+    if bet > user['balance']:
+        await callback.answer("❌ Недостаточно средств!")
+        return
+    
+    win = random.random() <= 0.45
+    colors = ["красное", "черное"]
+    chosen_color = random.choice(colors)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        if win:
+            win_amount = bet * 2
+            await db.execute(
+                "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                (win_amount - bet, user_id)
+            )
+            
+            result_text = (
+                f"🎰 *РУЛЕТКА*\n\n"
+                f"🎉 *ПОБЕДА!*\n\n"
+                f"🎲 Выпало: *{chosen_color}*\n"
+                f"💰 Ставка: {bet}₽\n"
+                f"🏆 Выигрыш: *{win_amount}₽*\n"
+                f"💎 Чистая прибыль: *{bet}₽*\n"
+                f"📈 Новый баланс: *{user['balance'] + bet}₽*\n\n"
+                f"Везет же некоторым! 🎰"
+            )
+        else:
+            await db.execute(
+                "UPDATE players SET balance = balance - ? WHERE user_id = ?",
+                (bet, user_id)
+            )
+            
+            result_text = (
+                f"🎰 *РУЛЕТКА*\n\n"
+                f"💥 *ПРОИГРЫШ!*\n\n"
+                f"🎲 Выпало: *{chosen_color}*\n"
+                f"💰 Ставка: {bet}₽\n"
+                f"📉 Потеряно: *{bet}₽*\n"
+                f"💸 Новый баланс: *{user['balance'] - bet}₽*\n\n"
+                f"Не повезло... 🍀"
+            )
+        
+        await db.execute(
+            '''INSERT INTO transactions (user_id, type, amount, description)
+               VALUES (?, 'roulette', ?, ?)''',
+            (user_id, win_amount - bet if win else -bet, 
+             f"Рулетка: {'выигрыш' if win else 'проигрыш'}")
+        )
+        
+        await db.commit()
+    
+    await callback.message.edit_text(
+        result_text,
+        parse_mode="Markdown",
+        reply_markup=get_minigames_keyboard()
+    )
+    await callback.answer()
+
+# ==================== УКЛАДКА АСФАЛЬТА (РАБОТАЕТ) ====================
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -593,14 +693,6 @@ async def handle_lay_asphalt(callback: CallbackQuery):
     
     if random.random() <= 0.7:
         earnings = 10
-        result_text = (
-            f"✅ *Асфальт уложен успешно!*\n\n"
-            f"🛣️ Уложен 1 метр асфальта\n"
-            f"💰 Заработано: *{earnings}₽*\n"
-            f"📏 Всего уложено: *{user.get('asphalt_meters', 0) + 1} метров*\n"
-            f"💵 Заработано на асфальте: *{user.get('asphalt_earned', 0) + earnings}₽*\n\n"
-            f"Хорошая работа! 🏗️"
-        )
         
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute(
@@ -613,22 +705,20 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 (user_id, earnings, "Укладка 1 метра асфальта")
             )
             await db.commit()
-    
-    else:
-        penalty = random.randint(5, 20)
-        penalty_reasons = [
-            "асфальт лег неровно! 📏",
-            "использовал некачественный материал! 🧱",
-            "работал слишком медленно! 🐌"
-        ]
+        
+        user = await get_user(user_id)
         
         result_text = (
-            f"⚠️ *ВИТАЛИК ШТРАФУЕТ!*\n\n"
-            f"🛣️ При укладке асфальта: {random.choice(penalty_reasons)}\n"
-            f"💸 Штраф: *{penalty}₽*\n"
-            f"💰 Новый баланс: *{user['balance'] - penalty}₽*\n\n"
-            f"Будь внимательнее! ⚠️"
+            f"✅ *Асфальт уложен успешно!*\n\n"
+            f"🛣️ Уложен 1 метр асфальта\n"
+            f"💰 Заработано: *{earnings}₽*\n"
+            f"📏 Всего уложено: *{user.get('asphalt_meters', 0)} метров*\n"
+            f"💵 Заработано на асфальте: *{user.get('asphalt_earned', 0)}₽*\n"
+            f"💰 Новый баланс: *{user['balance']}₽*\n\n"
+            f"Хорошая работа! 🏗️"
         )
+    else:
+        penalty = random.randint(5, 20)
         
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute(
@@ -641,6 +731,23 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 (user_id, penalty, "Штраф за плохую укладку асфальта")
             )
             await db.commit()
+        
+        user = await get_user(user_id)
+        
+        penalty_reasons = [
+            "асфальт лег неровно! 📏",
+            "использовал некачественный материал! 🧱",
+            "работал слишком медленно! 🐌",
+            "оставил мусор на дороге! 🗑️"
+        ]
+        
+        result_text = (
+            f"⚠️ *ВИТАЛИК ШТРАФУЕТ!*\n\n"
+            f"🛣️ При укладке асфальта: {random.choice(penalty_reasons)}\n"
+            f"💸 Штраф: *{penalty}₽*\n"
+            f"💰 Новый баланс: *{user['balance']}₽*\n\n"
+            f"Будь внимательнее! ⚠️"
+        )
     
     await callback.message.edit_text(
         result_text,
@@ -649,7 +756,30 @@ async def handle_lay_asphalt(callback: CallbackQuery):
     )
     await callback.answer()
 
-# ==================== СТАТИСТИКА (ИСПРАВЛЕНА) ====================
+@dp.callback_query(F.data == "asphalt_wait")
+async def handle_asphalt_wait(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await callback.answer("Ошибка: пользователь не найден")
+        return
+    
+    last_asphalt = user.get('last_asphalt')
+    if last_asphalt:
+        last_asphalt_time = datetime.fromisoformat(last_asphalt)
+        time_since_last = datetime.now() - last_asphalt_time
+        min_wait = timedelta(seconds=30)
+        
+        if time_since_last < min_wait:
+            wait_time = int((min_wait - time_since_last).total_seconds())
+            await callback.answer(f"⏳ Подожди еще {wait_time} секунд!", show_alert=True)
+        else:
+            await callback.answer("✅ Асфальт высох, можно укладывать!", show_alert=True)
+    else:
+        await callback.answer("✅ Можно начинать укладку!", show_alert=True)
+
+# ==================== СТАТИСТИКА ====================
 @dp.message(F.text == "📊 Статистика")
 async def handle_statistics(message: Message):
     user_id = message.from_user.id
@@ -660,7 +790,6 @@ async def handle_statistics(message: Message):
         return
     
     async with aiosqlite.connect(DB_NAME) as db:
-        # Количество транзакций
         cursor = await db.execute(
             "SELECT COUNT(*) as count FROM transactions WHERE user_id = ?",
             (user_id,)
@@ -668,7 +797,6 @@ async def handle_statistics(message: Message):
         txn_result = await cursor.fetchone()
         txn_count = txn_result[0] if txn_result else 0
         
-        # Общая сумма получки
         cursor = await db.execute(
             "SELECT SUM(amount) as total FROM transactions WHERE user_id = ? AND type = 'paycheck'",
             (user_id,)
@@ -676,7 +804,6 @@ async def handle_statistics(message: Message):
         paycheck_result = await cursor.fetchone()
         paycheck_total = paycheck_result[0] if paycheck_result and paycheck_result[0] else 0
         
-        # Количество штрафов
         cursor = await db.execute(
             "SELECT COUNT(*) as count FROM transactions WHERE user_id = ? AND type = 'penalty'",
             (user_id,)
@@ -684,7 +811,6 @@ async def handle_statistics(message: Message):
         penalties_result = await cursor.fetchone()
         penalties_count = penalties_result[0] if penalties_result else 0
         
-        # Сумма штрафов
         cursor = await db.execute(
             "SELECT SUM(amount) as total FROM transactions WHERE user_id = ? AND type = 'penalty'",
             (user_id,)
@@ -856,7 +982,7 @@ async def handle_transfer_amount(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
-# ==================== РАССЫЛКА (ИСПРАВЛЕНА) ====================
+# ==================== РАССЫЛКА ====================
 @dp.message(F.text == "📢 Рассылка")
 async def handle_broadcast_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
