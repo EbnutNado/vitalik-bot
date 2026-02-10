@@ -2762,3 +2762,116 @@ async def penalty_scheduler():
                 ECONOMY_SETTINGS["random_fine_interval_max"]
             )
             await asyncio.sleep(wait_time)
+            
+            all_users = await get_all_users()
+            logger.info(f"🔍 Проверка на штрафы: {len(all_users)} пользователей")
+            
+            for user in all_users:
+                user_data = await get_user(user['user_id'])
+                if not user_data:
+                    continue
+                    
+                if await has_fine_protection(user_data['user_id']):
+                    continue
+                
+                if random.random() <= 0.25 and user_data['balance'] > ECONOMY_SETTINGS["random_fine_min"]:
+                    penalty = random.randint(
+                        ECONOMY_SETTINGS["random_fine_min"],
+                        min(ECONOMY_SETTINGS["random_fine_max"], int(user_data['balance'] * 0.3))
+                    )
+                    
+                    penalty_reasons = [
+                        "Внеплановая проверка! Обнаружены нарушения.",
+                        "Неправильно заполнена отчетность.",
+                        "Опоздание на работу.",
+                        "Использование рабочего времени в личных целях.",
+                        "Нарушение дресс-кода.",
+                        "Невыполнение плана продаж.",
+                        "Поломка корпоративного оборудования.",
+                        "Конфликт с коллегами.",
+                        "Утечка конфиденциальной информации.",
+                        "Несанкционированный доступ к данным."
+                    ]
+                    
+                    reason = random.choice(penalty_reasons)
+                    
+                    await update_balance(
+                        user_data['user_id'], 
+                        -penalty, 
+                        "penalty",
+                        f"⚡️ Случайная проверка: {reason}"
+                    )
+                    
+                    try:
+                        await bot.send_message(
+                            user_data['user_id'],
+                            f"⚠️ *СЛУЧАЙНАЯ ПРОВЕРКА ОТ ВИТАЛИКА!*\n\n"
+                            f"📛 Причина: {reason}\n"
+                            f"💸 Штраф: {format_money(penalty)}\n"
+                            f"💰 Новый баланс: {format_money(user_data['balance'] - penalty)}\n\n"
+                            f"Купите 'Выходной' в магазине для защиты!",
+                            parse_mode="Markdown"
+                        )
+                        logger.info(f"Штраф {penalty}₽ пользователю {user_data['user_id']}")
+                    except Exception as e:
+                        logger.error(f"Не удалось отправить уведомление: {e}")
+        
+        except Exception as e:
+            logger.error(f"Ошибка в планировщике штрафов: {e}")
+            await asyncio.sleep(300)
+
+# ==================== КОМАНДЫ АДМИНИСТРАТОРА ====================
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    all_users = await get_all_users()
+    
+    total_balance = sum(u['balance'] for u in all_users)
+    total_players = len(all_users)
+    avg_balance = total_balance // total_players if total_players > 0 else 0
+    
+    stats_text = (
+        f"📊 *Статистика системы (команда)*\n\n"
+        f"👥 Всего игроков: {total_players}\n"
+        f"💰 Общий баланс: {format_money(total_balance)}\n"
+        f"📈 Средний баланс: {format_money(avg_balance)}\n\n"
+    )
+    
+    if all_users:
+        richest = max(all_users, key=lambda x: x['balance'])
+        poorest = min(all_users, key=lambda x: x['balance'])
+        
+        stats_text += (
+            f"🏆 Самый богатый: {richest['full_name']} ({format_money(richest['balance'])})\n"
+            f"😢 Самый бедный: {poorest['full_name']} ({format_money(poorest['balance'])})\n"
+        )
+    
+    await message.answer(stats_text, parse_mode="Markdown")
+
+# ==================== ЗАПУСК БОТА ====================
+async def on_startup():
+    await init_db()
+    
+    # Проверяем username бота
+    bot_info = await bot.get_me()
+    if not bot_info.username:
+        logger.error("❌ У бота нет username! Чеки не будут работать.")
+        logger.error("Установите username в @BotFather и перезапустите бота.")
+    else:
+        logger.info(f"✅ Username бота: @{bot_info.username}")
+    
+    asyncio.create_task(penalty_scheduler())
+    logger.info("✅ Бот запущен! Всё должно работать.")
+
+async def on_shutdown():
+    logger.info("🛑 Бот останавливается...")
+
+async def main():
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    await dp.start_polling(bot, skip_updates=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
