@@ -239,15 +239,26 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
     }
     
     for row in rows:
-        pill_type, strength, side_effects = row
+        pill_type = row[0]  # Индекс 0 - pill_type
+        strength = row[1]   # Индекс 1 - effect_strength
+        side_effects_json = row[2]  # Индекс 2 - side_effects
+        
         if pill_type in ["nagirt_pro", "nagirt_extreme"]:
             effects["salary_boost"] += strength
             effects["asphalt_boost"] += strength
         elif pill_type == "nagirt_light":
             effects["asphalt_boost"] += strength
         
-        if side_effects:
-            effects["side_effects"].append(side_effects)
+        if side_effects_json:
+            try:
+                # Пытаемся распарсить JSON
+                side_effects_list = json.loads(side_effects_json)
+                if isinstance(side_effects_list, list):
+                    effects["side_effects"].extend(side_effects_list)
+            except (json.JSONDecodeError, TypeError):
+                # Если не JSON, добавляем как строку
+                if side_effects_json.strip():
+                    effects["side_effects"].append(side_effects_json)
     
     return effects
 
@@ -295,7 +306,7 @@ async def get_active_boosts(user_id: int) -> float:
             (user_id, datetime.now().isoformat())
         )
         result = await cursor.fetchone()
-        return result[0] if result and result[0] else 0.0
+        return float(result[0]) if result and result[0] else 0.0
 
 async def has_fine_protection(user_id: int) -> bool:
     async with aiosqlite.connect(DB_NAME) as db:
@@ -721,7 +732,7 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="⚡️ Штраф", callback_data="admin_fine")],
         [InlineKeyboardButton(text="🎁 Бонус", callback_data="admin_bonus")],
-        [InlineKeyboardButton(text="🧾 Чеки", callback_data="admin_checks")],  # НОВАЯ КНОПКА
+        [InlineKeyboardButton(text="🧾 Чеки", callback_data="admin_checks")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="admin_close")]
     ]
@@ -883,132 +894,21 @@ async def handle_check_activation(message: Message, check_id: str):
         await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
         return
     
-    if result['amount']:
-        reward_text = f"💰 *{format_money(result['amount'])}*"
-    else:
-        reward_text = f"🎁 *{result['reward_text']}*"
+    response = f"🎉 *ЧЕК АКТИВИРОВАН!*\n\n"
     
-    response = (
-        f"🎉 *ЧЕК АКТИВИРОВАН!*\n\n"
-        f"✅ Вы получили: {reward_text}\n"
-        f"👤 От: {result['creator_name']}\n"
-        f"🔢 {result['used_count']}/{result['max_uses']} использований\n"
-    )
+    if result.get('amount'):
+        response += f"✅ Вы получили: 💰 *{format_money(result['amount'])}*\n"
+    elif result.get('reward_text'):
+        response += f"✅ Вы получили: 🎁 *{result['reward_text']}*\n"
     
-    if result['message']:
+    response += f"👤 От: {result['creator_name']}\n"
+    response += f"🔢 {result['used_count']}/{result['max_uses']} использований\n"
+    
+    if result.get('message'):
         response += f"💌 Сообщение: {result['message']}\n"
     
-    response += f"\n🏦 *Баланс обновлён!*\n"
-    
-    user = await get_user(user_id)
-    response += f"💰 Ваш баланс: {format_money(user['balance'])}\n\n"
-    
-    response += (
-        f"🎮 *Доступные функции:*\n"
-        f"• 💰 Получка каждые 5 минут\n"
-        f"• 🛒 Магазин с бустами и таблетками\n"
-        f"• 🎮 Мини-игры (рулетка, асфальт)\n"
-        f"• 🔁 Переводы другим игрокам\n\n"
-        f"*Добро пожаловать в компанию Виталика!* 👔"
-    )
-    
-    await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
-
-async def handle_check_activation(message: Message, check_id: str):
-    """Активация чека по ссылке"""
-    user_id = message.from_user.id
-    username = message.from_user.username or "Без username"
-    full_name = message.from_user.full_name
-    
-    await register_user(user_id, username, full_name)
-    
-    result = await activate_gift_check_by_link(user_id, check_id)
-    
-    if not result['success']:
-        # ... существующий код для неудачи ...
-        return
-    
-    if result['amount']:
-        reward_text = f"💰 *{format_money(result['amount'])}*"
-    else:
-        reward_text = f"🎁 *{result['reward_text']}*"
-    
-    response = (
-        f"🎉 *ЧЕК АКТИВИРОВАН!*\n\n"
-        f"✅ Вы получили: {reward_text}\n"
-        f"👤 От: {result['creator_name']}\n"
-        f"🔢 {result['used_count']}/{result['max_uses']} использований\n"
-    )
-    
-    if result['message']:
-        response += f"💌 Сообщение: {result['message']}\n"
-    
-    # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О ЭФФЕКТЕ
     if 'effect_text' in result:
         response += f"\n✨ *Эффект:* {result['effect_text']}\n"
-    
-    response += f"\n🏦 *Баланс обновлён!*\n"
-    
-    user = await get_user(user_id)
-    response += f"💰 Ваш баланс: {format_money(user['balance'])}\n\n"
-    
-    response += (
-        f"🎮 *Доступные функции:*\n"
-        f"• 💰 Получка каждые 5 минут\n"
-        f"• 🛒 Магазин с бустами и таблетками\n"
-        f"• 🎮 Мини-игры (рулетка, асфальт)\n"
-        f"• 🔁 Переводы другим игрокам\n\n"
-        f"*Добро пожаловать в компанию Виталика!* 👔"
-    )
-    
-    await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
-
-        welcome_text = (
-            f"👋 Добро пожаловать на работу, {full_name}!\n\n"
-            f"Я *Виталик* — ваш генеральный директор! 👔\n\n"
-            f"💰 *Начальный капитал:* {format_money(user['balance'] if user else ECONOMY_SETTINGS['start_balance'])}\n"
-            f"💼 *Зарплата:* каждые 5 минут\n"
-            f"⚡️ *Случайные проверки:* каждые 20-30 минут\n\n"
-        )
-        
-        if nagirt_effects["has_active"]:
-            welcome_text += f"💊 *Активные таблетки:* +{int(nagirt_effects['salary_boost']*100)}%\n"
-            welcome_text += f"⚠️ Риск штрафа: {ECONOMY_SETTINGS['fine_chance']*100}%\n\n"
-        
-        welcome_text += (
-            f"📊 *Доступные функции:*\n"
-            f"• 💰 Получка ({format_money(ECONOMY_SETTINGS['salary_min'])}-{format_money(ECONOMY_SETTINGS['salary_max'])})\n"
-            f"• 🛒 Магазин (реалистичные цены)\n"
-            f"• 🔁 Переводы между сотрудниками\n"
-            f"• 🎮 Мини-игры для дополнительного заработка\n"
-            f"• 💊 Таблетки Нагирт (риск/награда)\n"
-            f"• 📊 Статистика и рейтинг\n\n"
-        )
-        
-        if tolerance > 1.0:
-            welcome_text += f"📈 Толерантность к Нагирт: +{int((tolerance-1)*100)}%\n\n"
-        
-        welcome_text += "*Внимание! Злоупотребление таблетками может привести к увольнению!* 💊"
-        
-        welcome_text += extra_text
-        
-        await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
-        return
-    
-    if result['amount']:
-        reward_text = f"💰 *{format_money(result['amount'])}*"
-    else:
-        reward_text = f"🎁 *{result['reward_text']}*"
-    
-    response = (
-        f"🎉 *ЧЕК АКТИВИРОВАН!*\n\n"
-        f"✅ Вы получили: {reward_text}\n"
-        f"👤 От: {result['creator_name']}\n"
-        f"🔢 {result['used_count']}/{result['max_uses']} использований\n"
-    )
-    
-    if result['message']:
-        response += f"💌 Сообщение: {result['message']}\n"
     
     response += f"\n🏦 *Баланс обновлён!*\n"
     
@@ -1499,7 +1399,8 @@ async def handle_game_asphalt(callback: CallbackQuery):
     if nagirt_effects["has_active"]:
         asphalt_text += f"💊 *Активный Нагирт:* +{int(nagirt_effects['asphalt_boost']*100)}% к заработку\n"
         if nagirt_effects["side_effects"]:
-            asphalt_text += f"⚠️ *Побочки:* {', '.join(nagirt_effects['side_effects'][:2])}\n"
+            side_effects_str = ', '.join(nagirt_effects["side_effects"][:2])
+            asphalt_text += f"⚠️ *Побочки:* {side_effects_str}\n"
         asphalt_text += "\n"
     
     if can_work:
@@ -1691,7 +1592,8 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         
         # Если есть побочные эффекты, добавляем сообщение
         if nagirt_effects["side_effects"]:
-            result_text += f"\n\n💊 *Побочки:* {', '.join(nagirt_effects['side_effects'])}"
+            side_effects_str = ', '.join(nagirt_effects["side_effects"][:3])  # Ограничиваем 3 эффектами
+            result_text += f"\n\n💊 *Побочки:* {side_effects_str}"
     
     # Отправляем результат
     await callback.message.answer(result_text, parse_mode="Markdown")
@@ -1708,7 +1610,8 @@ async def handle_lay_asphalt(callback: CallbackQuery):
     if nagirt_effects["has_active"]:
         menu_text += f"\n💊 *Нагирт активен:* +{int(nagirt_effects['asphalt_boost']*100)}% к заработку"
         if nagirt_effects["side_effects"]:
-            menu_text += f"\n⚠️ Побочки: {', '.join(nagirt_effects['side_effects'][:2])}"
+            side_effects_str = ', '.join(nagirt_effects["side_effects"][:2])
+            menu_text += f"\n⚠️ Побочки: {side_effects_str}"
     
     menu_text += f"\n\n⏳ Асфальт сохнет...\nЖди 30 секунд перед следующей укладкой."
     
@@ -2860,115 +2763,3 @@ async def penalty_scheduler():
             )
             await asyncio.sleep(wait_time)
             
-            all_users = await get_all_users()
-            logger.info(f"🔍 Проверка на штрафы: {len(all_users)} пользователей")
-            
-            for user in all_users:
-                user_data = await get_user(user['user_id'])
-                if not user_data:
-                    continue
-                    
-                if await has_fine_protection(user_data['user_id']):
-                    continue
-                
-                if random.random() <= 0.25 and user_data['balance'] > ECONOMY_SETTINGS["random_fine_min"]:
-                    penalty = random.randint(
-                        ECONOMY_SETTINGS["random_fine_min"],
-                        min(ECONOMY_SETTINGS["random_fine_max"], int(user_data['balance'] * 0.3))
-                    )
-                    
-                    penalty_reasons = [
-                        "Внеплановая проверка! Обнаружены нарушения.",
-                        "Неправильно заполнена отчетность.",
-                        "Опоздание на работу.",
-                        "Использование рабочего времени в личных целях.",
-                        "Нарушение дресс-кода.",
-                        "Невыполнение плана продаж.",
-                        "Поломка корпоративного оборудования.",
-                        "Конфликт с коллегами.",
-                        "Утечка конфиденциальной информации.",
-                        "Несанкционированный доступ к данным."
-                    ]
-                    
-                    reason = random.choice(penalty_reasons)
-                    
-                    await update_balance(
-                        user_data['user_id'], 
-                        -penalty, 
-                        "penalty",
-                        f"⚡️ Случайная проверка: {reason}"
-                    )
-                    
-                    try:
-                        await bot.send_message(
-                            user_data['user_id'],
-                            f"⚠️ *СЛУЧАЙНАЯ ПРОВЕРКА ОТ ВИТАЛИКА!*\n\n"
-                            f"📛 Причина: {reason}\n"
-                            f"💸 Штраф: {format_money(penalty)}\n"
-                            f"💰 Новый баланс: {format_money(user_data['balance'] - penalty)}\n\n"
-                            f"Купите 'Выходной' в магазине для защиты!",
-                            parse_mode="Markdown"
-                        )
-                        logger.info(f"Штраф {penalty}₽ пользователю {user_data['user_id']}")
-                    except Exception as e:
-                        logger.error(f"Не удалось отправить уведомление: {e}")
-        
-        except Exception as e:
-            logger.error(f"Ошибка в планировщике штрафов: {e}")
-            await asyncio.sleep(300)
-
-# ==================== КОМАНДЫ АДМИНИСТРАТОРА ====================
-@dp.message(Command("stats"))
-async def cmd_stats(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    all_users = await get_all_users()
-    
-    total_balance = sum(u['balance'] for u in all_users)
-    total_players = len(all_users)
-    avg_balance = total_balance // total_players if total_players > 0 else 0
-    
-    stats_text = (
-        f"📊 *Статистика системы (команда)*\n\n"
-        f"👥 Всего игроков: {total_players}\n"
-        f"💰 Общий баланс: {format_money(total_balance)}\n"
-        f"📈 Средний баланс: {format_money(avg_balance)}\n\n"
-    )
-    
-    if all_users:
-        richest = max(all_users, key=lambda x: x['balance'])
-        poorest = min(all_users, key=lambda x: x['balance'])
-        
-        stats_text += (
-            f"🏆 Самый богатый: {richest['full_name']} ({format_money(richest['balance'])})\n"
-            f"😢 Самый бедный: {poorest['full_name']} ({format_money(poorest['balance'])})\n"
-        )
-    
-    await message.answer(stats_text, parse_mode="Markdown")
-
-# ==================== ЗАПУСК БОТА ====================
-async def on_startup():
-    await init_db()
-    
-    # Проверяем username бота
-    bot_info = await bot.get_me()
-    if not bot_info.username:
-        logger.error("❌ У бота нет username! Чеки не будут работать.")
-        logger.error("Установите username в @BotFather и перезапустите бота.")
-    else:
-        logger.info(f"✅ Username бота: @{bot_info.username}")
-    
-    asyncio.create_task(penalty_scheduler())
-    logger.info("✅ Бот запущен! Всё должно работать.")
-
-async def on_shutdown():
-    logger.info("🛑 Бот останавливается...")
-
-async def main():
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    await dp.start_polling(bot, skip_updates=True)
-
-if __name__ == "__main__":
-    asyncio.run(main())
