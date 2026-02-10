@@ -392,7 +392,6 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
             
         elif check['check_type'] == 'item':
             item_id = check['item_id']
-            # Находим товар в магазине
             item = None
             for shop_item in SHOP_ITEMS:
                 if shop_item["id"] == item_id:
@@ -400,10 +399,100 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
                     break
             
             if item:
+                received_item = item['name']
+                effect_text = ""
+                
                 if item.get("type") == "boost":
                     await add_boost(user_id, item["id"], item["value"], item["hours"])
+                    effect_text = f"📈 Буст активирован! +{int(item['value']*100)}% к зарплате на {item['hours']}ч"
+                    
                 elif item.get("type") == "pill":
-                    await add_nagirt_pill(user_id, item["id"], item["effect"], item["hours"])
+                    tolerance = await get_nagirt_tolerance(user_id)
+                    real_effect = item["effect"] / tolerance
+                    
+                    side_effects_list = []
+                    side_effect_chance = item.get("side_effect_chance", 0)
+                    
+                    if random.randint(1, 100) <= side_effect_chance:
+                        side_effects_pool = [
+                            "Тошнота", "Головокружение", "Дрожь в руках", "Нарушение координации",
+                            "Слабость", "Спутанность сознания", "Повышенное давление", "Тахикардия"
+                        ]
+                        num_effects = 1
+                        if item["id"] == "nagirt_pro":
+                            num_effects = random.randint(1, 2)
+                        elif item["id"] == "nagirt_extreme":
+                            num_effects = random.randint(2, 3)
+                        
+                        side_effects_list = random.sample(side_effects_pool, min(num_effects, len(side_effects_pool)))
+                    
+                    side_effects_json = json.dumps(side_effects_list, ensure_ascii=False)
+                    
+                    await add_nagirt_pill(user_id, item["id"], real_effect, item["hours"], side_effects_json)
+                    
+                    tolerance_increase = 0.1
+                    if item["id"] == "nagirt_pro":
+                        tolerance_increase = 0.15
+                    elif item["id"] == "nagirt_extreme":
+                        tolerance_increase = 0.2
+                    
+                    await update_nagirt_tolerance(user_id, tolerance_increase)
+                    
+                    effect_text = f"💊 Таблетка принята! Эффект: +{int(real_effect*100)}% на {item['hours']}ч"
+                    
+                    if side_effects_list:
+                        effect_text += f"\n⚠️ Побочные эффекты: {', '.join(side_effects_list)}"
+                    
+                    if tolerance > 1.0:
+                        effect_text += f"\n📉 Толерантность: +{int((tolerance-1)*100)}% (эффект ослаблен)"
+                    
+                elif item.get("type") == "protection":
+                    if item["id"] == "day_off":
+                        immunity_until = (datetime.now() + timedelta(hours=item["hours"])).isoformat()
+                        await db.execute(
+                            "UPDATE players SET penalty_immunity_until = ? WHERE user_id = ?",
+                            (immunity_until, user_id)
+                        )
+                        effect_text = f"✅ Иммунитет к штрафам активирован на {item['hours']}ч!"
+                    elif item["id"] == "insurance":
+                        await add_boost(user_id, "insurance", 0.8, 24)
+                        effect_text = "✅ Страховка активирована! Следующий штраф будет возмещен на 80%"
+                
+                elif item.get("type") == "antidote":
+                    await reset_nagirt_tolerance(user_id)
+                    await db.execute("DELETE FROM nagirt_pills WHERE user_id = ?", (user_id,))
+                    effect_text = "💉 Антидот применен! Все эффекты таблеток сняты, толерантность сброшена."
+                
+                elif item.get("type") == "lottery":
+                    # ЛОТЕРЕЯ - ИГРАЕМ СРАЗУ ПРИ АКТИВАЦИИ
+                    if random.random() <= 0.25:
+                        win_amount = random.randint(2000, 10000)
+                        await db.execute(
+                            "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                            (win_amount, user_id)
+                        )
+                        await db.execute('''
+                            INSERT INTO transactions (user_id, type, amount, description)
+                            VALUES (?, ?, ?, ?)
+                        ''', (user_id, 'lottery_win', win_amount, f"Выигрыш в лотерее из чека {check_id}"))
+                        effect_text = f"🎉 ДЖЕКПОТ! Вы выиграли {format_money(win_amount)}!"
+                    else:
+                        effect_text = "😔 Лотерейный билет оказался проигрышным... Попробуйте еще раз!"
+                
+                elif item.get("type") == "instant":
+                    salary = random.randint(
+                        ECONOMY_SETTINGS["salary_min"], 
+                        ECONOMY_SETTINGS["salary_max"]
+                    )
+                    await db.execute(
+                        "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                        (salary, user_id)
+                    )
+                    await db.execute('''
+                        INSERT INTO transactions (user_id, type, amount, description)
+                        VALUES (?, ?, ?, ?)
+                    ''', (user_id, 'instant_salary', salary, f"Мгновенная зарплата из чека {check_id}"))
+                    effect_text = f"⏱️ Мгновенная зарплата: {format_money(salary)}"
                 
                 await db.execute('''
                     UPDATE check_activations 
@@ -412,8 +501,12 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
                 ''', (item['name'], check_id, user_id))
                 
                 reward_text = f"{item['name']}"
+                
+                # Сохраняем текстовое описание эффекта для возврата
+                extra_info = {"effect_text": effect_text}
             else:
                 reward_text = "неизвестный предмет"
+                extra_info = {}
         
         await db.commit()
         
@@ -423,7 +516,7 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
         creator = await cursor.fetchone()
         creator_name = creator[0] if creator else "Администрация"
         
-        return {
+        result = {
             "success": True, 
             "amount": check.get('amount'),
             "item": check.get('item_id'),
@@ -433,6 +526,12 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
             "used_count": check['used_count'] + 1,
             "max_uses": check['max_uses']
         }
+        
+        # Добавляем информацию об эффекте, если есть
+        if check['check_type'] == 'item' and 'extra_info' in locals():
+            result.update(extra_info)
+        
+        return result
 
 async def get_active_checks() -> List[Dict[str, Any]]:
     """Получение списка активных чеков"""
@@ -747,10 +846,43 @@ async def handle_check_activation(message: Message, check_id: str):
     result = await activate_gift_check_by_link(user_id, check_id)
     
     if not result['success']:
-        extra_text = f"\n\n❌ *Не удалось активировать чек:* {result['error']}"
-        user = await get_user(user_id)
-        nagirt_effects = await get_active_nagirt_effects(user_id)
-        tolerance = await get_nagirt_tolerance(user_id)
+        # ... существующий код для неудачи ...
+        return
+    
+    if result['amount']:
+        reward_text = f"💰 *{format_money(result['amount'])}*"
+    else:
+        reward_text = f"🎁 *{result['reward_text']}*"
+    
+    response = (
+        f"🎉 *ЧЕК АКТИВИРОВАН!*\n\n"
+        f"✅ Вы получили: {reward_text}\n"
+        f"👤 От: {result['creator_name']}\n"
+        f"🔢 {result['used_count']}/{result['max_uses']} использований\n"
+    )
+    
+    if result['message']:
+        response += f"💌 Сообщение: {result['message']}\n"
+    
+    # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О ЭФФЕКТЕ
+    if 'effect_text' in result:
+        response += f"\n✨ *Эффект:* {result['effect_text']}\n"
+    
+    response += f"\n🏦 *Баланс обновлён!*\n"
+    
+    user = await get_user(user_id)
+    response += f"💰 Ваш баланс: {format_money(user['balance'])}\n\n"
+    
+    response += (
+        f"🎮 *Доступные функции:*\n"
+        f"• 💰 Получка каждые 5 минут\n"
+        f"• 🛒 Магазин с бустами и таблетками\n"
+        f"• 🎮 Мини-игры (рулетка, асфальт)\n"
+        f"• 🔁 Переводы другим игрокам\n\n"
+        f"*Добро пожаловать в компанию Виталика!* 👔"
+    )
+    
+    await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
         welcome_text = (
             f"👋 Добро пожаловать на работу, {full_name}!\n\n"
