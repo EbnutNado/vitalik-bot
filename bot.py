@@ -846,6 +846,85 @@ async def handle_check_activation(message: Message, check_id: str):
     result = await activate_gift_check_by_link(user_id, check_id)
     
     if not result['success']:
+        extra_text = f"\n\n❌ *Не удалось активировать чек:* {result['error']}"
+        user = await get_user(user_id)
+        nagirt_effects = await get_active_nagirt_effects(user_id)
+        tolerance = await get_nagirt_tolerance(user_id)
+
+        welcome_text = (
+            f"👋 Добро пожаловать на работу, {full_name}!\n\n"
+            f"Я *Виталик* — ваш генеральный директор! 👔\n\n"
+            f"💰 *Начальный капитал:* {format_money(user['balance'] if user else ECONOMY_SETTINGS['start_balance'])}\n"
+            f"💼 *Зарплата:* каждые 5 минут\n"
+            f"⚡️ *Случайные проверки:* каждые 20-30 минут\n\n"
+        )
+        
+        if nagirt_effects["has_active"]:
+            welcome_text += f"💊 *Активные таблетки:* +{int(nagirt_effects['salary_boost']*100)}%\n"
+            welcome_text += f"⚠️ Риск штрафа: {ECONOMY_SETTINGS['fine_chance']*100}%\n\n"
+        
+        welcome_text += (
+            f"📊 *Доступные функции:*\n"
+            f"• 💰 Получка ({format_money(ECONOMY_SETTINGS['salary_min'])}-{format_money(ECONOMY_SETTINGS['salary_max'])})\n"
+            f"• 🛒 Магазин (реалистичные цены)\n"
+            f"• 🔁 Переводы между сотрудниками\n"
+            f"• 🎮 Мини-игры для дополнительного заработка\n"
+            f"• 💊 Таблетки Нагирт (риск/награда)\n"
+            f"• 📊 Статистика и рейтинг\n\n"
+        )
+        
+        if tolerance > 1.0:
+            welcome_text += f"📈 Толерантность к Нагирту: +{int((tolerance-1)*100)}%\n\n"
+        
+        welcome_text += "*Внимание! Злоупотребление таблетками может привести к увольнению!* 💊"
+        
+        welcome_text += extra_text
+        
+        await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
+        return
+    
+    if result['amount']:
+        reward_text = f"💰 *{format_money(result['amount'])}*"
+    else:
+        reward_text = f"🎁 *{result['reward_text']}*"
+    
+    response = (
+        f"🎉 *ЧЕК АКТИВИРОВАН!*\n\n"
+        f"✅ Вы получили: {reward_text}\n"
+        f"👤 От: {result['creator_name']}\n"
+        f"🔢 {result['used_count']}/{result['max_uses']} использований\n"
+    )
+    
+    if result['message']:
+        response += f"💌 Сообщение: {result['message']}\n"
+    
+    response += f"\n🏦 *Баланс обновлён!*\n"
+    
+    user = await get_user(user_id)
+    response += f"💰 Ваш баланс: {format_money(user['balance'])}\n\n"
+    
+    response += (
+        f"🎮 *Доступные функции:*\n"
+        f"• 💰 Получка каждые 5 минут\n"
+        f"• 🛒 Магазин с бустами и таблетками\n"
+        f"• 🎮 Мини-игры (рулетка, асфальт)\n"
+        f"• 🔁 Переводы другим игрокам\n\n"
+        f"*Добро пожаловать в компанию Виталика!* 👔"
+    )
+    
+    await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
+
+async def handle_check_activation(message: Message, check_id: str):
+    """Активация чека по ссылке"""
+    user_id = message.from_user.id
+    username = message.from_user.username or "Без username"
+    full_name = message.from_user.full_name
+    
+    await register_user(user_id, username, full_name)
+    
+    result = await activate_gift_check_by_link(user_id, check_id)
+    
+    if not result['success']:
         # ... существующий код для неудачи ...
         return
     
