@@ -1,11 +1,11 @@
 """
-Telegram бот "Виталик Штрафующий" - ИСПРАВЛЕННАЯ ВЕРСИЯ
-Укладка асфальта и рулетка РАБОТАЮТ
+Telegram бот "Виталик Штрафующий" - ПОЛНАЯ ВЕРСИЯ С СИСТЕМОЙ ЧЕКОВ
 """
 
 import asyncio
 import logging
 import random
+import string
 import json
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
@@ -57,6 +57,7 @@ DB_NAME = "vitalik_bot_final.db"
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
+        # Основные таблицы
         await db.execute('''
             CREATE TABLE IF NOT EXISTS players (
                 user_id INTEGER PRIMARY KEY,
@@ -123,6 +124,36 @@ async def init_db():
                 user_id INTEGER PRIMARY KEY,
                 tolerance REAL DEFAULT 1.0,
                 last_used TIMESTAMP
+            )
+        ''')
+        
+        # Таблицы для чеков
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS gift_checks (
+                check_id TEXT PRIMARY KEY,
+                creator_id INTEGER,
+                check_type TEXT,
+                amount INTEGER,
+                item_id TEXT,
+                max_uses INTEGER DEFAULT 1,
+                used_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP,
+                expires_at TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE,
+                custom_message TEXT,
+                last_used TIMESTAMP,
+                activations_list TEXT DEFAULT '[]'
+            )
+        ''')
+        
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS check_activations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                check_id TEXT,
+                user_id INTEGER,
+                activated_at TIMESTAMP,
+                received_amount INTEGER,
+                received_item TEXT
             )
         ''')
         
@@ -311,6 +342,12 @@ class AdminBonusStates(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_amount = State()
 
+class CheckStates(StatesGroup):
+    waiting_for_check_amount = State()
+    waiting_for_check_uses = State()
+    waiting_for_check_hours = State()
+    waiting_for_check_message = State()
+
 # ==================== ФУНКЦИИ ДЛЯ ФОРМАТИРОВАНИЯ ====================
 def format_money(amount: int) -> str:
     return f"{amount:,}₽".replace(",", " ")
@@ -409,14 +446,257 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="⚡ Штраф", callback_data="admin_fine")],
         [InlineKeyboardButton(text="🎁 Бонус", callback_data="admin_bonus")],
+        [InlineKeyboardButton(text="🧾 Чеки", callback_data="admin_checks")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="admin_close")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def get_admin_checks_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="💰 Создать денежный чек", callback_data="admin_check_money")],
+        [InlineKeyboardButton(text="🎁 Создать товарный чек", callback_data="admin_check_item")],
+        [InlineKeyboardButton(text="📊 Список активных чеков", callback_data="admin_checks_list")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_items_for_checks() -> InlineKeyboardMarkup:
+    """Клавиатура с товарами для чеков"""
+    buttons = []
+    
+    boosts = [item for item in SHOP_ITEMS if item.get("type") == "boost"]
+    pills = [item for item in SHOP_ITEMS if item.get("type") == "pill"]
+    other = [item for item in SHOP_ITEMS if item.get("type") in ["antidote", "insurance", "lottery", "instant"]]
+    
+    if boosts:
+        buttons.append([InlineKeyboardButton(text="📈 БУСТЫ", callback_data="none")])
+        for item in boosts[:3]:
+            buttons.append([InlineKeyboardButton(
+                text=f"{item['name']}",
+                callback_data=f"check_item_{item['id']}"
+            )])
+    
+    if pills:
+        buttons.append([InlineKeyboardButton(text="💊 ТАБЛЕТКИ", callback_data="none")])
+        for item in pills:
+            buttons.append([InlineKeyboardButton(
+                text=f"{item['name']}",
+                callback_data=f"check_item_{item['id']}"
+            )])
+    
+    if other:
+        for item in other:
+            buttons.append([InlineKeyboardButton(
+                text=f"{item['name']}",
+                callback_data=f"check_item_{item['id']}"
+            )])
+    
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_check_item")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ==================== СИСТЕМА ЧЕКОВ ====================
+def generate_check_id() -> str:
+    """Генерация уникального ID чека"""
+    chars = string.ascii_uppercase + string.digits
+    return 'CHK_' + ''.join(random.choices(chars, k=12))
+
+async def create_gift_check(creator_id: int, check_type: str, amount: int = 0, 
+                           item_id: str = None, max_uses: int = 1, hours: int = 24,
+                           message: str = "") -> str:
+    """Создание подарочного чека"""
+    check_id = generate_check_id()
+    created_at = datetime.now()
+    expires_at = created_at + timedelta(hours=hours)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('''
+            INSERT INTO gift_checks 
+            (check_id, creator_id, check_type, amount, item_id, max_uses, 
+             created_at, expires_at, custom_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (check_id, creator_id, check_type, amount, item_id, max_uses,
+              created_at.isoformat(), expires_at.isoformat(), message))
+        await db.commit()
+    
+    return check_id
+
+async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, Any]:
+    """Активация подарочного чека по ссылке"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute('''
+            SELECT * FROM gift_checks 
+            WHERE check_id = ? AND is_active = 1 
+            AND (expires_at IS NULL OR expires_at > ?)
+        ''', (check_id, datetime.now().isoformat()))
+        check = await cursor.fetchone()
+        
+        if not check:
+            return {"success": False, "error": "Чек не найден или недействителен"}
+        
+        check = dict(check)
+        
+        if check['used_count'] >= check['max_uses']:
+            return {"success": False, "error": "Лимит использований исчерпан"}
+        
+        cursor = await db.execute('''
+            SELECT 1 FROM check_activations 
+            WHERE check_id = ? AND user_id = ?
+        ''', (check_id, user_id))
+        already_used = await cursor.fetchone()
+        
+        if already_used:
+            return {"success": False, "error": "Вы уже активировали этот чек"}
+        
+        await db.execute('''
+            UPDATE gift_checks 
+            SET used_count = used_count + 1, last_used = ?
+            WHERE check_id = ?
+        ''', (datetime.now().isoformat(), check_id))
+        
+        await db.execute('''
+            INSERT INTO check_activations (check_id, user_id, activated_at)
+            VALUES (?, ?, ?)
+        ''', (check_id, user_id, datetime.now().isoformat()))
+        
+        if check['check_type'] == 'money':
+            amount = check['amount']
+            await db.execute(
+                "UPDATE players SET balance = balance + ? WHERE user_id = ?",
+                (amount, user_id)
+            )
+            await db.execute('''
+                INSERT INTO transactions (user_id, type, amount, description)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, 'check', amount, f"Активация чека {check_id}"))
+            
+            await db.execute('''
+                UPDATE check_activations 
+                SET received_amount = ?
+                WHERE check_id = ? AND user_id = ?
+            ''', (amount, check_id, user_id))
+            
+            reward_text = f"{format_money(amount)}"
+            
+        elif check['check_type'] == 'item':
+            item_id = check['item_id']
+            item = None
+            for shop_item in SHOP_ITEMS:
+                if shop_item["id"] == item_id:
+                    item = shop_item
+                    break
+            
+            if item:
+                if item.get("type") == "boost":
+                    await add_boost(user_id, item["id"], item["value"], item["hours"])
+                elif item.get("type") == "pill":
+                    await add_nagirt_pill(user_id, item["id"], item["effect"], item["hours"])
+                
+                await db.execute('''
+                    UPDATE check_activations 
+                    SET received_item = ?
+                    WHERE check_id = ? AND user_id = ?
+                ''', (item['name'], check_id, user_id))
+                
+                reward_text = f"{item['name']}"
+            else:
+                reward_text = "неизвестный предмет"
+        
+        await db.commit()
+        
+        cursor = await db.execute('''
+            SELECT full_name FROM players WHERE user_id = ?
+        ''', (check['creator_id'],))
+        creator = await cursor.fetchone()
+        creator_name = creator[0] if creator else "Администрация"
+        
+        return {
+            "success": True, 
+            "amount": check.get('amount'),
+            "item": check.get('item_id'),
+            "reward_text": reward_text,
+            "message": check.get('custom_message', ''),
+            "creator_name": creator_name,
+            "used_count": check['used_count'] + 1,
+            "max_uses": check['max_uses']
+        }
+
+async def get_active_checks() -> List[Dict[str, Any]]:
+    """Получение списка активных чеков"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute('''
+            SELECT * FROM gift_checks 
+            WHERE is_active = 1 AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY created_at DESC
+        ''', (datetime.now().isoformat(),))
+        checks = await cursor.fetchall()
+        return [dict(check) for check in checks]
+
+async def get_check_stats(check_id: str) -> Dict[str, Any]:
+    """Статистика по чеку"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute('''
+            SELECT g.*, u.full_name as creator_name 
+            FROM gift_checks g
+            LEFT JOIN players u ON g.creator_id = u.user_id
+            WHERE g.check_id = ?
+        ''', (check_id,))
+        check = await cursor.fetchone()
+        
+        if not check:
+            return None
+        
+        check = dict(check)
+        
+        cursor = await db.execute('''
+            SELECT ca.*, p.full_name as user_name 
+            FROM check_activations ca
+            LEFT JOIN players p ON ca.user_id = p.user_id
+            WHERE ca.check_id = ?
+            ORDER BY ca.activated_at DESC
+        ''', (check_id,))
+        activations = await cursor.fetchall()
+        
+        check['activations'] = [dict(act) for act in activations]
+        return check
+
+async def deactivate_check(check_id: str):
+    """Деактивация чека"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('''
+            UPDATE gift_checks SET is_active = 0 WHERE check_id = ?
+        ''', (check_id,))
+        await db.commit()
+
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    """Обработка команды /start с параметром чека"""
+    args = message.text.split()
+    
+    if len(args) > 1:
+        # Возможно, это активация чека
+        check_id = args[1].upper()
+        
+        async with aiosqlite.connect(DB_NAME) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT 1 FROM gift_checks 
+                WHERE check_id = ? AND is_active = 1
+                AND (expires_at IS NULL OR expires_at > ?)
+            ''', (check_id, datetime.now().isoformat()))
+            check_exists = await cursor.fetchone()
+        
+        if check_exists:
+            # Это чек, активируем его
+            await handle_check_activation(message, check_id)
+            return
+    
+    # Обычный старт (регистрация)
     user_id = message.from_user.id
     username = message.from_user.username or "Без username"
     full_name = message.from_user.full_name
@@ -455,6 +735,85 @@ async def cmd_start(message: Message):
     welcome_text += "*Внимание! Злоупотребление таблетками может привести к увольнению!* 💊"
     
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
+
+async def handle_check_activation(message: Message, check_id: str):
+    """Активация чека по ссылке"""
+    user_id = message.from_user.id
+    username = message.from_user.username or "Без username"
+    full_name = message.from_user.full_name
+    
+    await register_user(user_id, username, full_name)
+    
+    result = await activate_gift_check_by_link(user_id, check_id)
+    
+    if not result['success']:
+        extra_text = f"\n\n❌ *Не удалось активировать чек:* {result['error']}"
+        user = await get_user(user_id)
+        nagirt_effects = await get_active_nagirt_effects(user_id)
+        tolerance = await get_nagirt_tolerance(user_id)
+
+        welcome_text = (
+            f"👋 Добро пожаловать на работу, {full_name}!\n\n"
+            f"Я *Виталик* — ваш генеральный директор! 👔\n\n"
+            f"💰 *Начальный капитал:* {format_money(user['balance'] if user else ECONOMY_SETTINGS['start_balance'])}\n"
+            f"💼 *Зарплата:* каждые 5 минут\n"
+            f"⚡ *Случайные проверки:* каждые 20-30 минут\n\n"
+        )
+        
+        if nagirt_effects["has_active"]:
+            welcome_text += f"💊 *Активные таблетки:* +{int(nagirt_effects['salary_boost']*100)}%\n"
+            welcome_text += f"⚠️ Риск штрафа: {ECONOMY_SETTINGS['fine_chance']*100}%\n\n"
+        
+        welcome_text += (
+            f"📊 *Доступные функции:*\n"
+            f"• 💰 Получка ({format_money(ECONOMY_SETTINGS['salary_min'])}-{format_money(ECONOMY_SETTINGS['salary_max'])})\n"
+            f"• 🛒 Магазин (реалистичные цены)\n"
+            f"• 🔁 Переводы между сотрудниками\n"
+            f"• 🎮 Мини-игры для дополнительного заработка\n"
+            f"• 💊 Таблетки Нагирт (риск/награда)\n"
+            f"• 📊 Статистика и рейтинг\n\n"
+        )
+        
+        if tolerance > 1.0:
+            welcome_text += f"📈 Толерантность к Нагирту: +{int((tolerance-1)*100)}%\n\n"
+        
+        welcome_text += "*Внимание! Злоупотребление таблетками может привести к увольнению!* 💊"
+        
+        welcome_text += extra_text
+        
+        await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
+        return
+    
+    if result['amount']:
+        reward_text = f"💰 *{format_money(result['amount'])}*"
+    else:
+        reward_text = f"🎁 *{result['reward_text']}*"
+    
+    response = (
+        f"🎉 *ЧЕК АКТИВИРОВАН!*\n\n"
+        f"✅ Вы получили: {reward_text}\n"
+        f"👤 От: {result['creator_name']}\n"
+        f"🔢 {result['used_count']}/{result['max_uses']} использований\n"
+    )
+    
+    if result['message']:
+        response += f"💌 Сообщение: {result['message']}\n"
+    
+    response += f"\n🏦 *Баланс обновлён!*\n"
+    
+    user = await get_user(user_id)
+    response += f"💰 Ваш баланс: {format_money(user['balance'])}\n\n"
+    
+    response += (
+        f"🎮 *Доступные функции:*\n"
+        f"• 💰 Получка каждые 5 минут\n"
+        f"• 🛒 Магазин с бустами и таблетками\n"
+        f"• 🎮 Мини-игры (рулетка, асфальт)\n"
+        f"• 🔁 Переводы другим игрокам\n\n"
+        f"*Добро пожаловать в компанию Виталика!* 👔"
+    )
+    
+    await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
 @dp.message(F.text == "💰 Получка")
 async def handle_paycheck(message: Message):
@@ -1649,6 +2008,451 @@ async def handle_admin_close(callback: CallbackQuery):
         await callback.message.delete()
     except:
         pass
+    await callback.answer()
+
+# ==================== СИСТЕМА АДМИН-ЧЕКОВ ====================
+@dp.callback_query(F.data == "admin_checks")
+async def handle_admin_checks(callback: CallbackQuery):
+    """Меню админ-чеков"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен!", show_alert=True)
+        return
+    
+    checks_text = (
+        "🧾 *АДМИН: СИСТЕМА ЧЕКОВ*\n\n"
+        "Создавайте подарочные чеки-ссылки:\n"
+        "• 🎁 **Денежные чеки** - фиксированная сумма\n"
+        "• 🎁 **Товарные чеки** - бусты, таблетки, предметы\n\n"
+        "Игроки активируют чеки простым переходом по ссылке!\n"
+        "Один человек = одна активация ⚠️"
+    )
+    
+    await callback.message.edit_text(checks_text, parse_mode="Markdown", 
+                                   reply_markup=get_admin_checks_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_checks_back")
+async def handle_admin_checks_back(callback: CallbackQuery):
+    """Назад к меню админ-чеков"""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    await callback.message.edit_text(
+        "🧾 *АДМИН: СИСТЕМА ЧЕКОВ*",
+        parse_mode="Markdown",
+        reply_markup=get_admin_checks_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_check_money")
+async def handle_admin_check_money(callback: CallbackQuery, state: FSMContext):
+    """Создание денежного чека"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "💰 *Создание денежного чека*\n\n"
+        "💸 Введите сумму чека (от 100 до 100000₽):",
+        parse_mode="Markdown"
+    )
+    
+    await state.update_data(check_type="money")
+    await state.set_state(CheckStates.waiting_for_check_amount)
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_check_item")
+async def handle_admin_check_item(callback: CallbackQuery, state: FSMContext):
+    """Выбор товара для чека"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "🎁 *Создание товарного чека*\n\n"
+        "Выберите товар для чека:",
+        parse_mode="Markdown",
+        reply_markup=get_items_for_checks()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("check_item_"))
+async def handle_check_item_select(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора товара"""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    item_id = callback.data[11:]  # check_item_
+    
+    item = None
+    for shop_item in SHOP_ITEMS:
+        if shop_item["id"] == item_id:
+            item = shop_item
+            break
+    
+    if not item:
+        await callback.answer("❌ Товар не найден", show_alert=True)
+        return
+    
+    await state.update_data(check_type="item", item_id=item_id)
+    
+    await callback.message.edit_text(
+        f"🎁 *Создание чека на товар*\n\n"
+        f"📦 Товар: {item['name']}\n"
+        f"💵 Стоимость в магазине: {format_money(item['price'])}\n\n"
+        f"🔢 Введите количество использований чека (1-100):",
+        parse_mode="Markdown"
+    )
+    
+    await state.set_state(CheckStates.waiting_for_check_uses)
+    await callback.answer()
+
+@dp.message(CheckStates.waiting_for_check_amount)
+async def handle_check_amount(message: Message, state: FSMContext):
+    """Обработка суммы чека"""
+    if message.from_user.id != ADMIN_ID:
+        await state.clear()
+        return
+    
+    try:
+        amount = int(message.text)
+        
+        if amount < 100:
+            await message.answer("❌ Минимальная сумма - 100₽")
+            return
+        if amount > 100000:
+            await message.answer("❌ Максимальная сумма - 100000₽")
+            return
+        
+        await state.update_data(amount=amount)
+        
+        await message.answer(
+            f"💰 Сумма: {format_money(amount)}\n\n"
+            f"🔢 Введите количество использований чека (1-1000):\n"
+            f"(Сколько людей смогут активировать этот чек)"
+        )
+        
+        await state.set_state(CheckStates.waiting_for_check_uses)
+        
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число!")
+
+@dp.message(CheckStates.waiting_for_check_uses)
+async def handle_check_uses(message: Message, state: FSMContext):
+    """Обработка количества использований"""
+    if message.from_user.id != ADMIN_ID:
+        await state.clear()
+        return
+    
+    try:
+        max_uses = int(message.text)
+        
+        if max_uses < 1:
+            await message.answer("❌ Минимум 1 использование")
+            return
+        if max_uses > 1000:
+            await message.answer("❌ Максимум 1000 использований")
+            return
+        
+        await state.update_data(max_uses=max_uses)
+        
+        await message.answer(
+            f"🔢 Использований: {max_uses}\n\n"
+            f"⏳ Введите срок действия в часах (1-720):\n"
+            f"(Через сколько часов чек станет недействительным)"
+        )
+        
+        await state.set_state(CheckStates.waiting_for_check_hours)
+        
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число!")
+
+@dp.message(CheckStates.waiting_for_check_hours)
+async def handle_check_hours(message: Message, state: FSMContext):
+    """Обработка срока действия"""
+    if message.from_user.id != ADMIN_ID:
+        await state.clear()
+        return
+    
+    try:
+        hours = int(message.text)
+        
+        if hours < 1:
+            await message.answer("❌ Минимум 1 час")
+            return
+        if hours > 720:
+            await message.answer("❌ Максимум 720 часов (30 дней)")
+            return
+        
+        await state.update_data(hours=hours)
+        
+        await message.answer(
+            f"⏳ Срок действия: {hours} часов\n\n"
+            f"💌 Введите сообщение для получателей (необязательно):\n"
+            f"Или отправьте '-' чтобы пропустить"
+        )
+        
+        await state.set_state(CheckStates.waiting_for_check_message)
+        
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число!")
+
+@dp.message(CheckStates.waiting_for_check_message)
+async def handle_check_message(message: Message, state: FSMContext):
+    """Обработка сообщения и создание чека"""
+    if message.from_user.id != ADMIN_ID:
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    check_type = data.get('check_type', 'money')
+    amount = data.get('amount', 0)
+    item_id = data.get('item_id')
+    max_uses = data.get('max_uses', 1)
+    hours = data.get('hours', 24)
+    custom_message = message.text if message.text != '-' else ""
+    
+    check_id = await create_gift_check(
+        creator_id=ADMIN_ID,
+        check_type=check_type,
+        amount=amount,
+        item_id=item_id,
+        max_uses=max_uses,
+        hours=hours,
+        message=custom_message
+    )
+    
+    if check_type == 'money':
+        check_info = f"💰 *Денежный чек на {format_money(amount)}*"
+        reward_text = f"{format_money(amount)}"
+    else:
+        item_name = "Неизвестный товар"
+        for shop_item in SHOP_ITEMS:
+            if shop_item["id"] == item_id:
+                item_name = shop_item['name']
+                break
+        check_info = f"🎁 *Товарный чек на {item_name}*"
+        reward_text = item_name
+    
+    expires_at = datetime.now() + timedelta(hours=hours)
+    
+    bot_username = (await bot.get_me()).username
+    check_link = f"https://t.me/{bot_username}?start={check_id}"
+    
+    check_text = (
+        f"✅ *ЧЕК УСПЕШНО СОЗДАН!*\n\n"
+        f"{check_info}\n"
+        f"🔢 Использований: {max_uses}\n"
+        f"⏳ Действует до: {expires_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+    )
+    
+    if custom_message:
+        check_text += f"💌 Сообщение: {custom_message}\n\n"
+    
+    check_text += (
+        f"🔗 *ССЫЛКА ДЛЯ АКТИВАЦИИ:*\n"
+        f"{check_link}\n\n"
+        f"📋 *ИНСТРУКЦИЯ:*\n"
+        f"1. Отправьте эту ссылку в чат\n"
+        f"2. Игроки переходят по ссылке\n"
+        f"3. Первые {max_uses} человек получат {reward_text}\n"
+        f"4. Остальные увидят, что чек уже использован\n\n"
+        f"🆔 Код чека: `{check_id}`"
+    )
+    
+    if check_type == 'money' and amount > 0:
+        check_text += f"\n\n⚠️ *Списано с вашего баланса:* {format_money(amount * max_uses)}"
+        
+        admin = await get_user(ADMIN_ID)
+        if admin and admin['balance'] < (amount * max_uses):
+            check_text += f"\n❌ *Недостаточно средств!* У вас {format_money(admin['balance'])}"
+        else:
+            async with aiosqlite.connect(DB_NAME) as db:
+                total_amount = amount * max_uses
+                await db.execute(
+                    "UPDATE players SET balance = balance - ? WHERE user_id = ?",
+                    (total_amount, ADMIN_ID)
+                )
+                await db.execute(
+                    "INSERT INTO transactions (user_id, type, amount, description) VALUES (?, ?, ?, ?)",
+                    (ADMIN_ID, 'check_create', -total_amount, f"Создание чека {check_id} ({max_uses} использований)")
+                )
+                await db.commit()
+    
+    buttons = [
+        [InlineKeyboardButton(text="📋 Скопировать ссылку", callback_data=f"copy_link_{check_id}")],
+        [InlineKeyboardButton(text="🧾 К списку чеков", callback_data="admin_checks_list")]
+    ]
+    
+    await message.answer(check_text, parse_mode="Markdown", 
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("copy_link_"))
+async def handle_copy_link(callback: CallbackQuery):
+    """Копирование ссылки на чек"""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    check_id = callback.data[10:]  # copy_link_
+    bot_username = (await bot.get_me()).username
+    check_link = f"https://t.me/{bot_username}?start={check_id}"
+    
+    await callback.answer(f"✅ Ссылка скопирована!\n{check_link}", show_alert=True)
+
+@dp.callback_query(F.data == "admin_checks_list")
+async def handle_admin_checks_list(callback: CallbackQuery):
+    """Список активных чеков"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен!", show_alert=True)
+        return
+    
+    active_checks = await get_active_checks()
+    
+    if not active_checks:
+        await callback.message.edit_text(
+            "📭 *Активных чеков нет*\n\n"
+            "Создайте первый чек через меню!",
+            parse_mode="Markdown",
+            reply_markup=get_admin_checks_keyboard()
+        )
+        await callback.answer()
+        return
+    
+    checks_text = "🧾 *АКТИВНЫЕ ЧЕКИ:*\n\n"
+    total_amount = 0
+    
+    for i, check in enumerate(active_checks[:10], 1):
+        expires_at = datetime.fromisoformat(check['expires_at'])
+        time_left = expires_at - datetime.now()
+        hours_left = int(time_left.total_seconds() // 3600)
+        
+        if check['check_type'] == 'money':
+            check_info = f"💰 {format_money(check['amount'])}"
+            total_amount += check['amount'] * (check['max_uses'] - check['used_count'])
+        else:
+            check_info = f"🎁 {check['item_id']}"
+        
+        checks_text += (
+            f"{i}. `{check['check_id'][:12]}...`\n"
+            f"   {check_info} | 👥 {check['used_count']}/{check['max_uses']}\n"
+            f"   ⏳ {hours_left}ч | 📅 {expires_at.strftime('%d.%m %H:%M')}\n"
+        )
+    
+    checks_text += f"\n📊 *Итого в обороте:* {format_money(total_amount)}"
+    
+    buttons = []
+    for i, check in enumerate(active_checks[:5], 1):
+        buttons.append([InlineKeyboardButton(
+            text=f"📊 Статистика {check['check_id'][:8]}...",
+            callback_data=f"check_stats_{check['check_id']}"
+        )])
+    
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_checks_back")])
+    
+    await callback.message.edit_text(
+        checks_text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("check_stats_"))
+async def handle_check_stats(callback: CallbackQuery):
+    """Статистика по конкретному чеку"""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    check_id = callback.data[12:]  # check_stats_
+    stats = await get_check_stats(check_id)
+    
+    if not stats:
+        await callback.answer("❌ Чек не найден", show_alert=True)
+        return
+    
+    expires_at = datetime.fromisoformat(stats['expires_at'])
+    created_at = datetime.fromisoformat(stats['created_at'])
+    
+    if stats['check_type'] == 'money':
+        check_info = f"💰 *Денежный чек на {format_money(stats['amount'])}*"
+    else:
+        check_info = f"🎁 *Товарный чек ({stats['item_id']})*"
+    
+    bot_username = (await bot.get_me()).username
+    check_link = f"https://t.me/{bot_username}?start={check_id}"
+    
+    stats_text = (
+        f"📊 *СТАТИСТИКА ЧЕКА*\n\n"
+        f"{check_info}\n"
+        f"👤 Создатель: {stats.get('creator_name', 'Админ')}\n"
+        f"📅 Создан: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"⏳ Действует до: {expires_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"👥 Использовано: {stats['used_count']}/{stats['max_uses']}\n"
+        f"🔗 Ссылка: `{check_link}`\n"
+    )
+    
+    if stats.get('custom_message'):
+        stats_text += f"💌 Сообщение: {stats['custom_message']}\n"
+    
+    if stats['activations']:
+        stats_text += f"\n🎯 *Активировали ({len(stats['activations'])}):*\n"
+        for i, act in enumerate(stats['activations'][:5], 1):
+            act_time = datetime.fromisoformat(act['activated_at'])
+            stats_text += f"{i}. {act.get('user_name', f'ID:{act['user_id']}')} - {act_time.strftime('%H:%M')}\n"
+        
+        if len(stats['activations']) > 5:
+            stats_text += f"... и ещё {len(stats['activations']) - 5} человек\n"
+    else:
+        stats_text += "\n🎯 Пока никто не активировал этот чек"
+    
+    buttons = [
+        [InlineKeyboardButton(text="🔗 Скопировать ссылку", callback_data=f"copy_link_{check_id}")],
+        [InlineKeyboardButton(text="🔙 К списку чеков", callback_data="admin_checks_list")],
+        [InlineKeyboardButton(text="❌ Деактивировать чек", callback_data=f"check_deactivate_{check_id}")]
+    ]
+    
+    await callback.message.edit_text(
+        stats_text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("check_deactivate_"))
+async def handle_check_deactivate(callback: CallbackQuery):
+    """Деактивация чека"""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    check_id = callback.data[16:]  # check_deactivate_
+    await deactivate_check(check_id)
+    
+    await callback.answer(f"✅ Чек {check_id} деактивирован!", show_alert=True)
+    
+    await handle_admin_checks_list(callback)
+
+@dp.callback_query(F.data == "admin_back")
+async def handle_admin_back(callback: CallbackQuery):
+    """Назад к админ-панели"""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    admin_text = (
+        "👑 *Админ-панель*\n\n"
+        "📊 *Статистика:*\n"
+        "• /stats - статистика всех игроков\n"
+        "• /broadcast - рассылка сообщения\n"
+        "• /bonus [ID] [сумма] - выдать бонус игроку\n"
+        "• /fine [ID] [сумма] - оштрафовать игроку\n\n"
+        "Или используйте кнопки ниже:"
+    )
+    
+    await callback.message.edit_text(
+        admin_text,
+        parse_mode="Markdown",
+        reply_markup=get_admin_keyboard()
+    )
     await callback.answer()
 
 # ==================== СТАТИСТИКА ====================
