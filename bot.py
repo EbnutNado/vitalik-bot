@@ -82,17 +82,6 @@ async def init_db():
             )
         ''')
         
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS nagiret_effects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                effect_type TEXT,
-                effect_value REAL,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
         await db.commit()
         logger.info("База данных инициализирована")
 
@@ -170,10 +159,6 @@ class TransferStates(StatesGroup):
 class BroadcastStates(StatesGroup):
     waiting_for_message = State()
 
-class MiniGameStates(StatesGroup):
-    roulette_bet = State()
-    dice_bet = State()
-
 # ==================== ТОВАРЫ МАГАЗИНА ====================
 SHOP_ITEMS = [
     {"id": "day_off", "name": "Выходной", "price": 500, "description": "Отдых от штрафов Виталика на 24 часа!", "bonus_chance": 0.7},
@@ -189,8 +174,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="💰 Получка"), KeyboardButton(text="🛒 Магазин")],
         [KeyboardButton(text="🔁 Перевод"), KeyboardButton(text="🎮 Мини-игры")],
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🏆 Достижения")],
-        [KeyboardButton(text="📢 Рассылка")]
+        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📢 Рассылка")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -204,15 +188,13 @@ def get_shop_keyboard(user_balance: int) -> InlineKeyboardMarkup:
         buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"buy_{item['id']}")])
     buttons.append([
         InlineKeyboardButton(text="💰 Баланс", callback_data="check_balance"),
-        InlineKeyboardButton(text="📜 История", callback_data="purchase_history")
+        InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_main")
     ])
-    buttons.append([InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_minigames_keyboard() -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="🎰 Рулетка (x2)", callback_data="game_roulette")],
-        [InlineKeyboardButton(text="🎲 Кости (x3)", callback_data="game_dice")],
+        [InlineKeyboardButton(text="🎰 Рулетка", callback_data="game_roulette")],
         [InlineKeyboardButton(text="🛣️ Укладка асфальта", callback_data="game_asphalt")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]
     ]
@@ -243,7 +225,7 @@ def get_users_keyboard(users: List[Dict[str, Any]], exclude_id: int) -> InlineKe
 async def check_and_apply_penalties():
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT user_id, full_name, balance, penalty_immunity_until, nagiret_penalty_multiplier FROM players WHERE balance > 0")
+        cursor = await db.execute("SELECT user_id, full_name, balance, penalty_immunity_until FROM players WHERE balance > 0")
         users = await cursor.fetchall()
         
         for user in users:
@@ -256,24 +238,7 @@ async def check_and_apply_penalties():
                 if immunity_time and immunity_time > datetime.now():
                     continue
             
-            penalty_chance = 0.15
-            
-            penalty_multiplier = user_dict.get('nagiret_penalty_multiplier', 1.0)
-            if penalty_multiplier > 1.0:
-                cursor2 = await db.execute(
-                    "SELECT expires_at FROM nagiret_effects WHERE user_id = ? AND effect_type = 'penalty_risk' ORDER BY created_at DESC LIMIT 1",
-                    (user_id,)
-                )
-                nagiret_effect = await cursor2.fetchone()
-                if nagiret_effect and datetime.fromisoformat(nagiret_effect['expires_at']) > datetime.now():
-                    penalty_chance *= penalty_multiplier
-                else:
-                    await db.execute(
-                        "UPDATE players SET nagiret_penalty_multiplier = 1.0 WHERE user_id = ?",
-                        (user_id,)
-                    )
-            
-            if random.random() <= penalty_chance:
+            if random.random() <= 0.15:
                 max_penalty = min(200, user_dict['balance'] * 0.3)
                 penalty = random.randint(50, max(50, int(max_penalty)))
                 
@@ -288,11 +253,7 @@ async def check_and_apply_penalties():
                         "штраф за криво уложенный асфальт! 🛣️",
                         "штраф за слишком громкий смех на работе! 😂",
                         "штраф за кофе без печеньки! ☕",
-                        "штраф за сон на рабочем месте! 💤",
-                        "штраф за разговор по телефону! 📱",
-                        "штраф за опоздание на 1 минуту! ⏰",
-                        "штраф за грязные ботинки! 👢",
-                        "штраф за то, что сегодня понедельник! 📅"
+                        "штраф за сон на рабочем месте! 💤"
                     ]
                     
                     reason = random.choice(penalty_reasons)
@@ -314,7 +275,7 @@ async def check_and_apply_penalties():
                             parse_mode="Markdown"
                         )
                     except Exception as e:
-                        logger.error(f"Не удалось отправить уведомление о штрафе: {e}")
+                        logger.error(f"Не удалось отправить уведомление: {e}")
         
         await db.commit()
 
@@ -326,7 +287,6 @@ async def penalty_scheduler():
             logger.error(f"Ошибка в планировщике штрафов: {e}")
         
         wait_time = random.randint(1800, 3600)
-        logger.info(f"Следующая проверка штрафов через {wait_time//60} минут")
         await asyncio.sleep(wait_time)
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
@@ -349,7 +309,6 @@ async def cmd_start(message: Message):
         f"• 🔁 Перевод — отправляй деньги другим\n"
         f"• 🎮 Мини-игры — зарабатывай деньги\n"
         f"• 📊 Статистика — твоя статистика\n"
-        f"• 🏆 Достижения — твои достижения\n"
         f"• 📢 Рассылка — только для администратора\n\n"
         f"⚠️ Я могу оштрафовать тебя в любой момент!\n"
         f"💊 Попробуй Нагирт в магазине!\n"
@@ -383,42 +342,6 @@ async def handle_paycheck(message: Message):
     paycheck_amount = random.randint(100, 500)
     
     async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """SELECT 1 FROM purchases 
-               WHERE user_id = ? AND item_name = 'Премиум-Буст' 
-               AND purchased_at > datetime('now', '-3 days')""",
-            (user_id,)
-        )
-        has_premium_boost = await cursor.fetchone()
-        
-        cursor = await db.execute(
-            """SELECT effect_value FROM nagiret_effects 
-               WHERE user_id = ? AND effect_type = 'paycheck_boost' 
-               AND expires_at > datetime('now') 
-               ORDER BY created_at DESC LIMIT 1""",
-            (user_id,)
-        )
-        nagiret_boost = await cursor.fetchone()
-    
-    boost_multiplier = 1.0
-    boost_text = ""
-    
-    if has_premium_boost:
-        boost_multiplier *= 2
-        boost_text += "Премиум-Буст: x2\n"
-    
-    if nagiret_boost:
-        boost_value = nagiret_boost['effect_value']
-        boost_multiplier *= boost_value
-        boost_text += f"Нагирт-буст: x{boost_value}\n"
-    
-    if boost_multiplier > 1.0:
-        paycheck_amount = int(paycheck_amount * boost_multiplier)
-        boost_text = f"🎁 *Бусты активны:*\n{boost_text}\n"
-    else:
-        boost_text = ""
-
-    async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             "UPDATE players SET balance = balance + ?, last_paycheck = ? WHERE user_id = ?",
             (paycheck_amount, current_time.isoformat(), user_id)
@@ -439,7 +362,6 @@ async def handle_paycheck(message: Message):
     
     response = (
         f"💸 *Получка получена!*\n\n"
-        f"{boost_text}"
         f"📈 Начислено: *{paycheck_amount}₽*\n"
         f"💰 Новый баланс: *{user['balance'] + paycheck_amount}₽*\n\n"
         f"{random.choice(jokes)}"
@@ -480,6 +402,7 @@ async def handle_buy_item(callback: CallbackQuery):
     user = await get_user(user_id)
     item_id = callback.data.split("_")[1]
     
+    # Ищем товар по ID
     item = None
     for shop_item in SHOP_ITEMS:
         if shop_item['id'] == item_id:
@@ -509,56 +432,6 @@ async def handle_buy_item(callback: CallbackQuery):
                 (immunity_until, user_id)
             )
             bonus_text = "Иммунитет к штрафам на 24 часа!"
-        
-        elif item['id'] == 'premium_boost' and bonus_applied:
-            bonus_text = "Премиум-буст активирован на 3 дня!"
-        
-        elif item['id'] == 'bonus_coin' and bonus_applied:
-            bonus_amount = random.randint(50, 200)
-            await db.execute(
-                "UPDATE players SET balance = balance + ? WHERE user_id = ?",
-                (bonus_amount, user_id)
-            )
-            bonus_text = f"Бонус: {bonus_amount}₽!"
-        
-        elif item['id'] == 'lottery_ticket' and bonus_applied:
-            lottery_win = random.randint(100, 1000)
-            await db.execute(
-                "UPDATE players SET balance = balance + ? WHERE user_id = ?",
-                (lottery_win, user_id)
-            )
-            bonus_text = f"Выигрыш в лотерее: {lottery_win}₽!"
-        
-        elif item['id'] == 'nagiret':
-            effect_type = random.choice(['paycheck_boost', 'penalty_risk'])
-            
-            if effect_type == 'paycheck_boost':
-                boost_value = round(random.uniform(1.3, 1.8), 1)
-                expires_at = datetime.now() + timedelta(hours=2)
-                
-                await db.execute(
-                    '''INSERT INTO nagiret_effects (user_id, effect_type, effect_value, expires_at)
-                       VALUES (?, ?, ?, ?)''',
-                    (user_id, effect_type, boost_value, expires_at.isoformat())
-                )
-                bonus_text = f"Нагирт: повышение получки на {int((boost_value-1)*100)}% на 2 часа!"
-            
-            else:
-                risk_multiplier = round(random.uniform(1.5, 3.0), 1)
-                expires_at = datetime.now() + timedelta(hours=1)
-                
-                await db.execute(
-                    "UPDATE players SET nagiret_penalty_multiplier = ? WHERE user_id = ?",
-                    (risk_multiplier, user_id)
-                )
-                
-                await db.execute(
-                    '''INSERT INTO nagiret_effects (user_id, effect_type, effect_value, expires_at)
-                       VALUES (?, ?, ?, ?)''',
-                    (user_id, effect_type, risk_multiplier, expires_at.isoformat())
-                )
-                bonus_text = f"Нагирт: риск штрафа увеличен в {risk_multiplier} раз на 1 час!"
-        
         else:
             bonus_text = "Без дополнительного бонуса"
         
@@ -606,37 +479,6 @@ async def handle_check_balance(callback: CallbackQuery):
     else:
         await callback.answer("Ошибка: пользователь не найден")
 
-@dp.callback_query(F.data == "purchase_history")
-async def handle_purchase_history(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            """SELECT item_name, price, bonus, purchased_at 
-               FROM purchases 
-               WHERE user_id = ? 
-               ORDER BY purchased_at DESC 
-               LIMIT 10""",
-            (user_id,)
-        )
-        purchases = await cursor.fetchall()
-    
-    if not purchases:
-        history_text = "📜 У вас еще нет покупок!"
-    else:
-        history_text = "📜 *Последние покупки:*\n\n"
-        for purchase in purchases:
-            purchase_date = datetime.fromisoformat(purchase['purchased_at']).strftime("%d.%m.%Y %H:%M")
-            history_text += (
-                f"🛍️ *{purchase['item_name']}*\n"
-                f"💰 {purchase['price']}₽ | {purchase['bonus']}\n"
-                f"📅 {purchase_date}\n"
-                f"——————————————\n"
-            )
-    
-    await callback.message.answer(history_text, parse_mode="Markdown")
-    await callback.answer()
-
 @dp.callback_query(F.data == "back_to_main")
 async def handle_back_to_main(callback: CallbackQuery):
     try:
@@ -670,12 +512,8 @@ async def handle_minigames(message: Message):
     games_text = (
         "🎮 *Мини-игры от Виталика!*\n\n"
         "Выбери игру:\n\n"
-        "🎰 *Рулетка (x2)*\n"
-        "Ставь на цвет!\n"
-        "Шанс выигрыша: 45%\n\n"
-        "🎲 *Кости (x3)*\n"
-        "Бросай кости!\n"
-        "Шанс выигрыша: 50%\n\n"
+        "🎰 *Рулетка*\n"
+        "Ставь на цвет!\n\n"
         "🛣️ *Укладка асфальта*\n"
         "Уложи 1 метр асфальта и получи 10₽!\n"
         "Перерыв: 30 секунд\n\n"
@@ -684,7 +522,7 @@ async def handle_minigames(message: Message):
     
     await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
 
-# ==================== УКЛАДКА АСФАЛЬТА ====================
+# ==================== УКЛАДКА АСФАЛЬТА (ИСПРАВЛЕНА) ====================
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -781,8 +619,7 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         penalty_reasons = [
             "асфальт лег неровно! 📏",
             "использовал некачественный материал! 🧱",
-            "работал слишком медленно! 🐌",
-            "оставил мусор на дороге! 🗑️"
+            "работал слишком медленно! 🐌"
         ]
         
         result_text = (
@@ -811,6 +648,81 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         reply_markup=get_asphalt_keyboard(False)
     )
     await callback.answer()
+
+# ==================== СТАТИСТИКА (ИСПРАВЛЕНА) ====================
+@dp.message(F.text == "📊 Статистика")
+async def handle_statistics(message: Message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь через /start")
+        return
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Количество транзакций
+        cursor = await db.execute(
+            "SELECT COUNT(*) as count FROM transactions WHERE user_id = ?",
+            (user_id,)
+        )
+        txn_result = await cursor.fetchone()
+        txn_count = txn_result[0] if txn_result else 0
+        
+        # Общая сумма получки
+        cursor = await db.execute(
+            "SELECT SUM(amount) as total FROM transactions WHERE user_id = ? AND type = 'paycheck'",
+            (user_id,)
+        )
+        paycheck_result = await cursor.fetchone()
+        paycheck_total = paycheck_result[0] if paycheck_result and paycheck_result[0] else 0
+        
+        # Количество штрафов
+        cursor = await db.execute(
+            "SELECT COUNT(*) as count FROM transactions WHERE user_id = ? AND type = 'penalty'",
+            (user_id,)
+        )
+        penalties_result = await cursor.fetchone()
+        penalties_count = penalties_result[0] if penalties_result else 0
+        
+        # Сумма штрафов
+        cursor = await db.execute(
+            "SELECT SUM(amount) as total FROM transactions WHERE user_id = ? AND type = 'penalty'",
+            (user_id,)
+        )
+        penalties_sum_result = await cursor.fetchone()
+        penalties_total = abs(penalties_sum_result[0]) if penalties_sum_result and penalties_sum_result[0] else 0
+    
+    reg_date = datetime.fromisoformat(user['registered_at']).strftime('%d.%m.%Y')
+    
+    stats_text = (
+        f"📊 *Статистика игрока:*\n\n"
+        f"👤 *{user['full_name']}*\n"
+        f"📅 Зарегистрирован: {reg_date}\n\n"
+        f"💰 *Финансы:*\n"
+        f"• Текущий баланс: *{user['balance']}₽*\n"
+        f"• Всего заработано: *{user.get('total_earned', 0)}₽*\n"
+        f"• Получено получки: *{paycheck_total}₽*\n\n"
+        f"📈 *Активность:*\n"
+        f"• Всего транзакций: *{txn_count}*\n"
+        f"• Получено штрафов: *{penalties_count}*\n"
+        f"• Сумма штрафов: *{penalties_total}₽*\n"
+        f"• Уложено асфальта: *{user.get('asphalt_meters', 0)} метров*\n"
+        f"• Заработано на асфальте: *{user.get('asphalt_earned', 0)}₽*\n"
+    )
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT full_name, balance FROM players ORDER BY balance DESC LIMIT 5"
+        )
+        top_players = await cursor.fetchall()
+    
+    if top_players:
+        stats_text += "\n🏆 *Топ-5 игроков:*\n"
+        for i, player in enumerate(top_players, 1):
+            medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i-1]
+            stats_text += f"{medal} {player[0]}: *{player[1]}₽*\n"
+    
+    await message.answer(stats_text, parse_mode="Markdown")
 
 # ==================== ПЕРЕВОДЫ ====================
 @dp.message(F.text == "🔁 Перевод")
@@ -916,19 +828,12 @@ async def handle_transfer_amount(message: Message, state: FSMContext):
             
             await db.commit()
         
-        jokes = [
-            f"Перевел {amount}₽? 🕵️",
-            f"Щедрый перевод! 😈",
-            f"{amount}₽ отправлены! 👀"
-        ]
-        
         response = (
             f"✅ *Перевод выполнен!*\n\n"
             f"📤 Отправитель: *Вы*\n"
             f"📥 Получатель: *{recipient['full_name']}*\n"
             f"💸 Сумма: *{amount}₽*\n"
             f"💰 Ваш новый баланс: *{user['balance'] - amount}₽*\n\n"
-            f"{random.choice(jokes)}"
         )
         
         try:
@@ -951,78 +856,7 @@ async def handle_transfer_amount(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
-# ==================== СТАТИСТИКА ====================
-@dp.message(F.text == "📊 Статистика")
-async def handle_statistics(message: Message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    
-    if not user:
-        await message.answer("Сначала зарегистрируйтесь через /start")
-        return
-    
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) as count FROM transactions WHERE user_id = ?",
-            (user_id,)
-        )
-        txn_result = await cursor.fetchone()
-        txn_count = txn_result['count'] if txn_result else 0
-        
-        cursor = await db.execute(
-            "SELECT SUM(amount) as total FROM transactions WHERE user_id = ? AND type = 'paycheck'",
-            (user_id,)
-        )
-        paycheck_result = await cursor.fetchone()
-        paycheck_total = paycheck_result['total'] if paycheck_result and paycheck_result['total'] else 0
-        
-        cursor = await db.execute(
-            "SELECT COUNT(*) as count FROM transactions WHERE user_id = ? AND type = 'penalty'",
-            (user_id,)
-        )
-        penalties_result = await cursor.fetchone()
-        penalties_count = penalties_result['count'] if penalties_result else 0
-        
-        cursor = await db.execute(
-            "SELECT SUM(amount) as total FROM transactions WHERE user_id = ? AND type = 'penalty'",
-            (user_id,)
-        )
-        penalties_sum_result = await cursor.fetchone()
-        penalties_total = abs(penalties_sum_result['total']) if penalties_sum_result and penalties_sum_result['total'] else 0
-    
-    reg_date = datetime.fromisoformat(user['registered_at']).strftime('%d.%m.%Y')
-    
-    stats_text = (
-        f"📊 *Статистика игрока:*\n\n"
-        f"👤 *{user['full_name']}*\n"
-        f"📅 Зарегистрирован: {reg_date}\n\n"
-        f"💰 *Финансы:*\n"
-        f"• Текущий баланс: *{user['balance']}₽*\n"
-        f"• Всего заработано: *{user.get('total_earned', 0)}₽*\n"
-        f"• Получено получки: *{paycheck_total}₽*\n\n"
-        f"📈 *Активность:*\n"
-        f"• Всего транзакций: *{txn_count}*\n"
-        f"• Получено штрафов: *{penalties_count}*\n"
-        f"• Сумма штрафов: *{penalties_total}₽*\n"
-        f"• Уложено асфальта: *{user.get('asphalt_meters', 0)} метров*\n"
-        f"• Заработано на асфальте: *{user.get('asphalt_earned', 0)}₽*\n"
-    )
-    
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "SELECT full_name, balance FROM players ORDER BY balance DESC LIMIT 5"
-        )
-        top_players = await cursor.fetchall()
-    
-    if top_players:
-        stats_text += "\n🏆 *Топ-5 игроков:*\n"
-        for i, player in enumerate(top_players, 1):
-            medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i-1]
-            stats_text += f"{medal} {player['full_name']}: *{player['balance']}₽*\n"
-    
-    await message.answer(stats_text, parse_mode="Markdown")
-
-# ==================== РАССЫЛКА ====================
+# ==================== РАССЫЛКА (ИСПРАВЛЕНА) ====================
 @dp.message(F.text == "📢 Рассылка")
 async def handle_broadcast_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -1067,68 +901,33 @@ async def handle_broadcast_message(message: Message, state: FSMContext):
         await state.clear()
         return
     
-    await message.answer(
-        f"📤 *Подтверждение рассылки*\n\n"
-        f"Сообщение будет отправлено *{len(all_users)}* пользователям.\n\n"
-        f"*Текст сообщения:*\n{broadcast_text}\n\n"
-        f"✅ Для подтверждения отправьте 'да'\n"
-        f"❌ Для отмены отправьте 'нет'",
-        parse_mode="Markdown"
+    await message.answer(f"⏳ Начинаю рассылку для {len(all_users)} пользователей...")
+    
+    success_count = 0
+    fail_count = 0
+    
+    for user in all_users:
+        try:
+            await bot.send_message(
+                user['user_id'],
+                f"📢 *ОБЪЯВЛЕНИЕ ОТ ВИТАЛИКА*\n\n{broadcast_text}",
+                parse_mode="Markdown"
+            )
+            success_count += 1
+            await asyncio.sleep(0.1)
+            
+        except Exception as e:
+            logger.error(f"Не удалось отправить рассылку: {e}")
+            fail_count += 1
+    
+    report = (
+        f"📊 *Отчет о рассылке*\n\n"
+        f"✅ Успешно отправлено: *{success_count}*\n"
+        f"❌ Не отправлено: *{fail_count}*\n"
+        f"📈 Общий охват: *{len(all_users)}* пользователей"
     )
     
-    await state.update_data(broadcast_text=broadcast_text)
-
-@dp.message(F.text.in_(["да", "нет"]))
-async def handle_broadcast_confirmation(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    confirmation = message.text.lower()
-    
-    if user_id != ADMIN_ID:
-        await state.clear()
-        return
-    
-    state_data = await state.get_data()
-    broadcast_text = state_data.get('broadcast_text', '')
-    
-    if not broadcast_text:
-        await message.answer("❌ Ошибка: текст рассылки не найден")
-        await state.clear()
-        return
-    
-    if confirmation == 'да':
-        all_users = await get_all_users()
-        
-        await message.answer(f"⏳ Начинаю рассылку для {len(all_users)} пользователей...")
-        
-        success_count = 0
-        fail_count = 0
-        
-        for user in all_users:
-            try:
-                await bot.send_message(
-                    user['user_id'],
-                    f"📢 *ОБЪЯВЛЕНИЕ ОТ ВИТАЛИКА*\n\n{broadcast_text}",
-                    parse_mode="Markdown"
-                )
-                success_count += 1
-                await asyncio.sleep(0.1)
-                
-            except Exception as e:
-                logger.error(f"Не удалось отправить рассылку: {e}")
-                fail_count += 1
-        
-        report = (
-            f"📊 *Отчет о рассылке*\n\n"
-            f"✅ Успешно отправлено: *{success_count}*\n"
-            f"❌ Не отправлено: *{fail_count}*\n"
-            f"📈 Общий охват: *{len(all_users)}* пользователей"
-        )
-        
-        await message.answer(report, parse_mode="Markdown")
-        
-    elif confirmation == 'нет':
-        await message.answer("❌ Рассылка отменена")
-    
+    await message.answer(report, parse_mode="Markdown")
     await state.clear()
 
 # ==================== ЗАПУСК БОТА ====================
