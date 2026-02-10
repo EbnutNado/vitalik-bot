@@ -813,8 +813,7 @@ async def handle_check_activation(message: Message, check_id: str):
     
     await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
-# ПРОДОЛЖЕНИЕ СЛЕДУЕТ... КОД СЛИШКОМ ДЛИННЫЙ, ВОТ ОСТАЛЬНАЯ ЧАСТЬ:
-
+# Продолжение основных обработчиков...
 @dp.message(F.text == "💰 Получка")
 async def handle_paycheck(message: Message):
     user_id = message.from_user.id
@@ -1138,7 +1137,7 @@ async def handle_game_roulette_start(callback: CallbackQuery, state: FSMContext)
 
 @dp.message(RouletteStates.waiting_for_bet)
 async def handle_roulette_bet(message: Message, state: FSMContext):
-    """Обработка ставки в рулетке - ИСПРАВЛЕНО"""
+    """Обработка ставки в рулетке"""
     user_id = message.from_user.id
     data = await state.get_data()
     
@@ -1187,7 +1186,7 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
                     (bet, user_id)  # Добавляем только выигрыш, ставка остается
                 )
                 
-                # Записываем транзакцию - ИСПРАВЛЕНО
+                # Записываем транзакцию
                 await db.execute(
                     '''INSERT INTO transactions (user_id, type, amount, description)
                        VALUES (?, ?, ?, ?)''',
@@ -1216,7 +1215,7 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
                     (bet, user_id)
                 )
                 
-                # Записываем транзакцию - ИСПРАВЛЕНО
+                # Записываем транзакцию
                 await db.execute(
                     '''INSERT INTO transactions (user_id, type, amount, description)
                        VALUES (?, ?, ?, ?)''',
@@ -1310,7 +1309,7 @@ async def handle_game_asphalt(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "lay_asphalt")
 async def handle_lay_asphalt(callback: CallbackQuery):
-    """Укладка асфальта с учетом таблеток Нагирт - ИСПРАВЛЕНО"""
+    """Укладка асфальта с учетом таблеток Нагирт"""
     user_id = callback.from_user.id
     
     # Получаем данные пользователя
@@ -1389,7 +1388,7 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 WHERE user_id = ?
             ''', (earnings, earnings, current_time.isoformat(), user_id))
             
-            # Записываем транзакцию - ИСПРАВЛЕНО
+            # Записываем транзакцию
             await db.execute('''
                 INSERT INTO transactions (user_id, type, amount, description)
                 VALUES (?, ?, ?, ?)
@@ -1451,7 +1450,7 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 WHERE user_id = ?
             ''', (penalty, current_time.isoformat(), penalty, user_id))
             
-            # Записываем транзакцию - ИСПРАВЛЕНО
+            # Записываем транзакцию
             await db.execute('''
                 INSERT INTO transactions (user_id, type, amount, description)
                 VALUES (?, ?, ?, ?)
@@ -2212,6 +2211,20 @@ async def handle_check_message(message: Message, state: FSMContext):
     hours = data.get('hours', 24)
     custom_message = message.text if message.text != '-' else ""
     
+    # Получаем username бота
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+    
+    if not bot_username:
+        await message.answer(
+            "❌ *ОШИБКА!*\n\n"
+            "У бота нет username! Без username нельзя создать ссылку.\n"
+            "Установите username в @BotFather и перезапустите бота.",
+            parse_mode="Markdown"
+        )
+        await state.clear()
+        return
+    
     check_id = await create_gift_check(
         creator_id=ADMIN_ID,
         check_type=check_type,
@@ -2221,6 +2234,9 @@ async def handle_check_message(message: Message, state: FSMContext):
         hours=hours,
         message=custom_message
     )
+    
+    # Создаем ссылку
+    check_link = f"https://t.me/{bot_username}?start={check_id}"
     
     if check_type == 'money':
         check_info = f"💰 *Денежный чек на {format_money(amount)}*"
@@ -2236,9 +2252,6 @@ async def handle_check_message(message: Message, state: FSMContext):
     
     expires_at = datetime.now() + timedelta(hours=hours)
     
-    bot_username = (await bot.get_me()).username
-    check_link = f"https://t.me/{bot_username}?start={check_id}"
-    
     check_text = (
         f"✅ *ЧЕК УСПЕШНО СОЗДАН!*\n\n"
         f"{check_info}\n"
@@ -2251,7 +2264,7 @@ async def handle_check_message(message: Message, state: FSMContext):
     
     check_text += (
         f"🔗 *ССЫЛКА ДЛЯ АКТИВАЦИИ:*\n"
-        f"{check_link}\n\n"
+        f"`{check_link}`\n\n"
         f"📋 *ИНСТРУКЦИЯ:*\n"
         f"1. Отправьте эту ссылку в чат\n"
         f"2. Игроки переходят по ссылке\n"
@@ -2260,27 +2273,8 @@ async def handle_check_message(message: Message, state: FSMContext):
         f"🆔 Код чека: `{check_id}`"
     )
     
-    if check_type == 'money' and amount > 0:
-        check_text += f"\n\n⚠️ *Списано с вашего баланса:* {format_money(amount * max_uses)}"
-        
-        admin = await get_user(ADMIN_ID)
-        if admin and admin['balance'] < (amount * max_uses):
-            check_text += f"\n❌ *Недостаточно средств!* У вас {format_money(admin['balance'])}"
-        else:
-            async with aiosqlite.connect(DB_NAME) as db:
-                total_amount = amount * max_uses
-                await db.execute(
-                    "UPDATE players SET balance = balance - ? WHERE user_id = ?",
-                    (total_amount, ADMIN_ID)
-                )
-                await db.execute(
-                    "INSERT INTO transactions (user_id, type, amount, description) VALUES (?, ?, ?, ?)",
-                    (ADMIN_ID, 'check_create', -total_amount, f"Создание чека {check_id} ({max_uses} использований)")
-                )
-                await db.commit()
-    
     buttons = [
-        [InlineKeyboardButton(text="📋 Скопировать ссылку", callback_data=f"copy_link_{check_id}")],
+        [InlineKeyboardButton(text="📋 Отправить ссылку в чат", callback_data=f"send_link_{check_id}")],
         [InlineKeyboardButton(text="🧾 К списку чеков", callback_data="admin_checks_list")]
     ]
     
@@ -2289,17 +2283,74 @@ async def handle_check_message(message: Message, state: FSMContext):
     
     await state.clear()
 
-@dp.callback_query(F.data.startswith("copy_link_"))
-async def handle_copy_link(callback: CallbackQuery):
-    """Копирование ссылки на чек"""
+@dp.callback_query(F.data.startswith("send_link_"))
+async def handle_send_link(callback: CallbackQuery):
+    """Отправка ссылки на чек в чат"""
     if callback.from_user.id != ADMIN_ID:
         return
     
-    check_id = callback.data[10:]  # copy_link_
-    bot_username = (await bot.get_me()).username
+    check_id = callback.data[10:]  # send_link_
+    
+    # Получаем информацию о чеке
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT check_type, amount, item_id, max_uses, used_count FROM gift_checks WHERE check_id = ?",
+            (check_id,)
+        )
+        check = await cursor.fetchone()
+    
+    if not check:
+        await callback.answer("❌ Чек не найден", show_alert=True)
+        return
+    
+    check = dict(check)
+    
+    # Получаем username бота
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+    
+    if not bot_username:
+        await callback.answer("❌ У бота нет username!", show_alert=True)
+        return
+    
+    # Создаем ссылку
     check_link = f"https://t.me/{bot_username}?start={check_id}"
     
-    await callback.answer(f"✅ Ссылка скопирована!\n{check_link}", show_alert=True)
+    remaining_uses = check['max_uses'] - check['used_count']
+    
+    if check['check_type'] == 'money':
+        reward_text = f"{format_money(check['amount'])}"
+        message_text = (
+            f"🎁 *ПОДАРОЧНЫЙ ЧЕК ОТ АДМИНИСТРАЦИИ!*\n\n"
+            f"💰 Сумма: {reward_text}\n"
+            f"👥 Доступно использований: {remaining_uses}/{check['max_uses']}\n\n"
+            f"🔗 *Активировать:* {check_link}\n\n"
+            f"📱 *Как использовать:*\n"
+            f"1. Нажмите на ссылку выше\n"
+            f"2. Нажмите START в боте\n"
+            f"3. Получите деньги на баланс!"
+        )
+    else:
+        item_name = "Неизвестный товар"
+        for shop_item in SHOP_ITEMS:
+            if shop_item["id"] == check['item_id']:
+                item_name = shop_item['name']
+                break
+        message_text = (
+            f"🎁 *ПОДАРОЧНЫЙ ЧЕК ОТ АДМИНИСТРАЦИИ!*\n\n"
+            f"📦 Награда: {item_name}\n"
+            f"👥 Доступно использований: {remaining_uses}/{check['max_uses']}\n\n"
+            f"🔗 *Активировать:* {check_link}\n\n"
+            f"📱 *Как использовать:*\n"
+            f"1. Нажмите на ссылку выше\n"
+            f"2. Нажмите START в боте\n"
+            f"3. Получите предмет в инвентарь!"
+        )
+    
+    # Отправляем сообщение в чат
+    await callback.message.answer(message_text, parse_mode="Markdown")
+    await callback.answer("✅ Ссылка отправлена в чат!")
 
 @dp.callback_query(F.data == "admin_checks_list")
 async def handle_admin_checks_list(callback: CallbackQuery):
@@ -2379,8 +2430,15 @@ async def handle_check_stats(callback: CallbackQuery):
     else:
         check_info = f"🎁 *Товарный чек ({stats['item_id']})*"
     
-    bot_username = (await bot.get_me()).username
-    check_link = f"https://t.me/{bot_username}?start={check_id}"
+    # Получаем username бота
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+    
+    if bot_username:
+        check_link = f"https://t.me/{bot_username}?start={check_id}"
+        link_text = f"🔗 *Ссылка:* `{check_link}`"
+    else:
+        link_text = "❌ *У бота нет username!*"
     
     stats_text = (
         f"📊 *СТАТИСТИКА ЧЕКА*\n\n"
@@ -2389,7 +2447,7 @@ async def handle_check_stats(callback: CallbackQuery):
         f"📅 Создан: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
         f"⏳ Действует до: {expires_at.strftime('%d.%m.%Y %H:%M')}\n"
         f"👥 Использовано: {stats['used_count']}/{stats['max_uses']}\n"
-        f"🔗 Ссылка: `{check_link}`\n"
+        f"{link_text}\n"
     )
     
     if stats.get('custom_message'):
@@ -2408,7 +2466,7 @@ async def handle_check_stats(callback: CallbackQuery):
         stats_text += "\n🎯 Пока никто не активировал этот чек"
     
     buttons = [
-        [InlineKeyboardButton(text="🔗 Скопировать ссылку", callback_data=f"copy_link_{check_id}")],
+        [InlineKeyboardButton(text="📤 Отправить ссылку", callback_data=f"send_link_{check_id}")],
         [InlineKeyboardButton(text="🔙 К списку чеков", callback_data="admin_checks_list")],
         [InlineKeyboardButton(text="❌ Деактивировать чек", callback_data=f"check_deactivate_{check_id}")]
     ]
@@ -2677,6 +2735,15 @@ async def cmd_stats(message: Message):
 # ==================== ЗАПУСК БОТА ====================
 async def on_startup():
     await init_db()
+    
+    # Проверяем username бота
+    bot_info = await bot.get_me()
+    if not bot_info.username:
+        logger.error("❌ У бота нет username! Чеки не будут работать.")
+        logger.error("Установите username в @BotFather и перезапустите бота.")
+    else:
+        logger.info(f"✅ Username бота: @{bot_info.username}")
+    
     asyncio.create_task(penalty_scheduler())
     logger.info("✅ Бот запущен! Всё должно работать.")
 
