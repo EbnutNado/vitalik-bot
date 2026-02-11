@@ -1,6 +1,6 @@
 """
 Telegram бот "Виталик Штрафующий"
-✅ Чеки исправлены | ✅ Дуэль пошаговая | ✅ Нагирт ужесточён | ✅ БИЗНЕС-СИСТЕМА
+✅ Чеки исправлены | ✅ Дуэль без ухода в минус | ✅ Нагирт ужесточён | ✅ БИЗНЕС-СИСТЕМА (КНОПКИ РАБОТАЮТ)
 """
 
 import asyncio
@@ -8,7 +8,7 @@ import logging
 import random
 import string
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
@@ -376,11 +376,24 @@ async def register_user(user_id: int, username: str, full_name: str):
             )
             await db.commit()
 
+# 🔥 ИСПРАВЛЕННАЯ update_balance – защита от ухода в минус
 async def update_balance(user_id: int, amount: int, txn_type: str, description: str):
     async with aiosqlite.connect(DB_NAME) as db:
+        # Получаем текущий баланс
+        cursor = await db.execute("SELECT balance FROM players WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return
+        current_balance = row[0]
+        new_balance = current_balance + amount
+        # Если уходим в минус — срезаем до 0 и корректируем amount
+        if new_balance < 0:
+            amount = -current_balance  # списываем всё, что есть
+            new_balance = 0
+
         await db.execute(
-            "UPDATE players SET balance = balance + ? WHERE user_id = ?",
-            (amount, user_id)
+            "UPDATE players SET balance = ? WHERE user_id = ?",
+            (new_balance, user_id)
         )
         if txn_type == "salary":
             await db.execute(
@@ -789,7 +802,8 @@ def get_items_for_checks() -> InlineKeyboardMarkup:
             buttons.append([InlineKeyboardButton(text=f"{item['name']}", callback_data=f"check_item_{item['id']}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_check_item")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-    # ==================== МАШИНЫ СОСТОЯНИЙ ====================
+
+# ==================== МАШИНЫ СОСТОЯНИЙ ====================
 class TransferStates(StatesGroup):
     choosing_recipient = State()
     entering_amount = State()
@@ -974,8 +988,7 @@ async def deactivate_check(check_id: str):
             UPDATE gift_checks SET is_active = 0 WHERE check_id = ?
         ''', (check_id,))
         await db.commit()
-
-# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
+        # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     args = message.text.split()
@@ -1589,17 +1602,16 @@ async def handle_asphalt_wait(callback: CallbackQuery):
     else:
         await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
 
-# ==================== ДУЭЛЬ (ПОШАГОВАЯ, С БИЗНЕС-БОНУСОМ) ====================
+# ==================== ДУЭЛЬ (ПОШАГОВАЯ, БЕЗ УХОДА В МИНУС) ====================
 async def duel_cancel_by_timeout(duel_id: str, challenger_id: int, acceptor_id: int, bet: int):
     await asyncio.sleep(DUEL_TIMEOUT)
     if duel_id not in active_duels:
         return
     duel = active_duels[duel_id]
     if duel["status"] != "finished":
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, challenger_id))
-            await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, acceptor_id))
-            await db.commit()
+        # Возвращаем ставки
+        await update_balance(challenger_id, bet, "duel_refund", "Возврат ставки (таймаут)")
+        await update_balance(acceptor_id, bet, "duel_refund", "Возврат ставки (таймаут)")
         try:
             await bot.send_message(challenger_id, "⏰ Дуэль отменена из-за бездействия. Ставки возвращены.")
             await bot.send_message(acceptor_id, "⏰ Дуэль отменена из-за бездействия. Ставки возвращены.")
@@ -1730,6 +1742,7 @@ async def duel_confirm_challenge(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("❌ Не удалось отправить вызов. Возможно, противник заблокировал бота.")
         await state.clear()
 
+# 🔥 ИСПРАВЛЕННАЯ ДУЭЛЬ – БАЛАНС НЕ УХОДИТ В МИНУС
 @dp.callback_query(F.data.startswith("duel_accept_"))
 async def duel_accept(callback: CallbackQuery):
     acceptor_id = callback.from_user.id
@@ -1743,21 +1756,22 @@ async def duel_accept(callback: CallbackQuery):
 
     challenger = await get_user(challenger_id)
     acceptor = await get_user(acceptor_id)
+
     if not challenger or not acceptor:
         await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
 
+    # 🔐 ЖЁСТКАЯ ПРОВЕРКА БАЛАНСА – НИКАКИХ МИНУСОВ!
     if challenger['balance'] < bet:
-        await callback.message.edit_text("❌ У противника недостаточно средств. Дуэль отменена.")
+        await callback.message.edit_text("❌ У противника уже нет денег для дуэли. Вызов отменён.")
         return
     if acceptor['balance'] < bet:
         await callback.message.edit_text("❌ У вас недостаточно средств для участия в дуэли.")
         return
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (bet, challenger_id))
-        await db.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (bet, acceptor_id))
-        await db.commit()
+    # ✅ СПИСЫВАЕМ СТАВКИ ЧЕРЕЗ update_balance (с защитой от минуса)
+    await update_balance(challenger_id, -bet, "duel_bet", f"Ставка в дуэли против {acceptor['full_name']}")
+    await update_balance(acceptor_id, -bet, "duel_bet", f"Ставка в дуэли против {challenger['full_name']}")
 
     duel_id = f"{challenger_id}_{acceptor_id}_{int(datetime.now().timestamp())}"
     active_duels[duel_id] = {
@@ -1876,10 +1890,9 @@ async def duel_roll(callback: CallbackQuery):
             winner_roll = acceptor_roll
             loser_roll = challenger_roll
         else:
-            async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, duel["challenger_id"]))
-                await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, duel["acceptor_id"]))
-                await db.commit()
+            # НИЧЬЯ – возвращаем ставки
+            await update_balance(duel["challenger_id"], bet, "duel_refund", "Возврат ставки (ничья)")
+            await update_balance(duel["acceptor_id"], bet, "duel_refund", "Возврат ставки (ничья)")
             await bot.send_message(
                 duel["challenger_id"],
                 f"🤝 *НИЧЬЯ!*\n\n"
@@ -1898,9 +1911,10 @@ async def duel_roll(callback: CallbackQuery):
             await callback.answer()
             return
 
+        # 🏆 ПОБЕДИТЕЛЬ – начисляем удвоенную ставку (свою + противника)
         prize = bet * 2
         await update_balance(winner_id, prize, "duel_win", f"Победа в дуэли против {loser_name}, ставка {bet}")
-        await update_balance(loser_id, -bet, "duel_lose", f"Поражение в дуэли против {winner_name}, ставка {bet}")
+        # У проигравшего ставка уже списана, ничего дополнительно не списываем
 
         await bot.send_message(
             winner_id,
@@ -1931,13 +1945,26 @@ async def duel_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-# ==================== БИЗНЕС-СИСТЕМА (ПОЛНЫЙ ИНТЕРФЕЙС) ====================
-@dp.message(F.text == "🏢 Бизнес")
-async def cmd_business_menu(message: Message):
-    user_id = message.from_user.id
+# ==================== БИЗНЕС-СИСТЕМА (ПОЛНЫЙ ИНТЕРФЕЙС, ИСПРАВЛЕНА) ====================
+async def cmd_business_menu(target: Union[Message, CallbackQuery], user_id: int = None):
+    """Универсальная функция для показа меню бизнесов. Работает и из сообщения, и из callback."""
+    if isinstance(target, CallbackQuery):
+        message = target.message
+        if user_id is None:
+            user_id = target.from_user.id
+        is_callback = True
+    else:
+        message = target
+        if user_id is None:
+            user_id = message.from_user.id
+        is_callback = False
+
     user = await get_user(user_id)
     if not user:
-        await message.answer("❌ Сначала зарегистрируйся через /start")
+        if is_callback:
+            await target.answer("❌ Сначала зарегистрируйся через /start", show_alert=True)
+        else:
+            await message.answer("❌ Сначала зарегистрируйся через /start")
         return
 
     biz_list = await get_user_businesses(user_id)
@@ -1963,7 +1990,14 @@ async def cmd_business_menu(message: Message):
         [InlineKeyboardButton(text="💰 Собрать доход", callback_data="biz_collect")]
     ])
 
-    await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+    if is_callback:
+        await target.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    else:
+        await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+
+@dp.message(F.text == "🏢 Бизнес")
+async def handle_business_button(message: Message):
+    await cmd_business_menu(message)
 
 @dp.callback_query(F.data == "biz_shop")
 async def biz_shop(callback: CallbackQuery):
@@ -2002,7 +2036,7 @@ async def biz_buy(callback: CallbackQuery):
     success, msg = await buy_business(callback.from_user.id, biz_key)
     await callback.answer(msg, show_alert=True)
     if success:
-        await cmd_business_menu(callback.message)
+        await cmd_business_menu(callback, user_id=callback.from_user.id)
 
 @dp.callback_query(F.data == "biz_my")
 async def biz_my(callback: CallbackQuery):
@@ -2123,13 +2157,13 @@ async def biz_collect(callback: CallbackQuery):
 
     if amount > 0:
         await callback.answer(f"💰 Собрано {format_money(amount)}!", show_alert=False)
-        await cmd_business_menu(callback.message)
+        await cmd_business_menu(callback, user_id=user_id)
     else:
         await callback.answer("❌ Нет дохода для сбора (кулдаун 1 час)", show_alert=True)
 
 @dp.callback_query(F.data == "biz_back_to_menu")
 async def biz_back_to_menu(callback: CallbackQuery):
-    await cmd_business_menu(callback.message)
+    await cmd_business_menu(callback, user_id=callback.from_user.id)
     await callback.answer()
 
 @dp.message(Command("collect"))
