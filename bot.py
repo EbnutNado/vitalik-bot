@@ -1,6 +1,6 @@
 """
 Telegram бот "Виталик Штрафующий"
-✅ Чеки исправлены | ✅ Дуэль с броском кубика | ✅ Нагирт ужесточён
+✅ Чеки исправлены | ✅ Дуэль пошаговая (без дублей) | ✅ Нагирт ужесточён
 """
 
 import asyncio
@@ -38,7 +38,7 @@ ECONOMY_SETTINGS = {
     "salary_min": 800,
     "salary_max": 2500,
     "salary_interval": 300,
-    "fine_chance": 0.45,                # повышен
+    "fine_chance": 0.45,
     "random_fine_min": 300,
     "random_fine_max": 1500,
     "asphalt_earnings": 50,
@@ -1256,15 +1256,13 @@ async def handle_asphalt_wait(callback: CallbackQuery):
     else:
         await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
 
-# ==================== ДУЭЛЬ (ПОШАГОВАЯ) ====================
+# ==================== ДУЭЛЬ (ПОШАГОВАЯ, ИСПРАВЛЕНА) ====================
 async def duel_cancel_by_timeout(duel_id: str, challenger_id: int, acceptor_id: int, bet: int):
-    """Отмена дуэли, если игрок не бросил кубик за отведённое время."""
     await asyncio.sleep(DUEL_TIMEOUT)
     if duel_id not in active_duels:
         return
     duel = active_duels[duel_id]
     if duel["status"] != "finished":
-        # Возвращаем ставки
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, challenger_id))
             await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, acceptor_id))
@@ -1443,7 +1441,6 @@ async def duel_accept(callback: CallbackQuery):
         "message_ids": []
     }
 
-    # Сообщение вызывающему игроку (первый бросок)
     challenger_msg = await bot.send_message(
         challenger_id,
         f"⚔️ *ДУЭЛЬ ПРИНЯТА!*\n\n"
@@ -1456,7 +1453,6 @@ async def duel_accept(callback: CallbackQuery):
         ])
     )
 
-    # Сообщение принявшему (ожидание)
     acceptor_msg = await callback.message.edit_text(
         f"⚔️ *ВЫ ПРИНЯЛИ ДУЭЛЬ!*\n\n"
         f"Противник: {challenger['full_name']}\n"
@@ -1546,7 +1542,7 @@ async def duel_roll(callback: CallbackQuery):
             winner_roll = acceptor_roll
             loser_roll = challenger_roll
         else:
-            # Ничья
+            # Ничья – возвращаем ставки
             async with aiosqlite.connect(DB_NAME) as db:
                 await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, duel["challenger_id"]))
                 await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, duel["acceptor_id"]))
@@ -1570,10 +1566,7 @@ async def duel_roll(callback: CallbackQuery):
             return
 
         prize = bet * 2
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (prize, winner_id))
-            await db.commit()
-
+        # ✅ Только ОДИН вызов – через update_balance
         await update_balance(winner_id, prize, "duel_win", f"Победа в дуэли против {loser_name}, ставка {bet}")
         await update_balance(loser_id, -bet, "duel_lose", f"Поражение в дуэли против {winner_name}, ставка {bet}")
 
@@ -2590,7 +2583,7 @@ async def on_startup():
     else:
         logger.info(f"✅ Username бота: @{bot_info.username}")
     asyncio.create_task(penalty_scheduler())
-    logger.info("✅ Бот запущен! Дуэль пошаговая, Нагирт ужесточён, чеки исправлены.")
+    logger.info("✅ Бот запущен! Дуэль пошаговая (без дублей), Нагирт ужесточён, чеки исправлены.")
 
 async def on_shutdown():
     logger.info("🛑 Бот останавливается...")
