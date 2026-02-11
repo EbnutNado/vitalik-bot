@@ -1,6 +1,7 @@
 """
 Telegram бот "Виталик Штрафующий"
-✅ Чеки исправлены | ✅ Дуэль без ухода в минус | ✅ Нагирт ужесточён | ✅ БИЗНЕС-СИСТЕМА (КНОПКИ РАБОТАЮТ)
+✅ Чеки исправлены | ✅ Дуэль без ухода в минус | ✅ Нагирт ужесточён
+✅ БИЗНЕС-СИСТЕМА: таймер сбора, сумма дохода, кулдаун 1 час
 """
 
 import asyncio
@@ -68,7 +69,6 @@ SHOP_ITEMS = [
     {"id": "insurance", "name": "🛡️ Страховка", "price": 4000,
      "description": "Страховка от одного штрафа (возмещает 80%)", "type": "insurance"},
 
-    # 💊 НАГИРТ – ужесточён
     {"id": "nagirt_light", "name": "💊 Нагирт Лайт", "price": 2000,
      "description": "+15% к зарплате, +20% к играм на 2 часа. Риск штрафа +10%",
      "type": "pill", "effect_salary": 0.15, "effect_game": 0.2, "hours": 2,
@@ -376,19 +376,17 @@ async def register_user(user_id: int, username: str, full_name: str):
             )
             await db.commit()
 
-# 🔥 ИСПРАВЛЕННАЯ update_balance – защита от ухода в минус
 async def update_balance(user_id: int, amount: int, txn_type: str, description: str):
+    """Безопасное обновление баланса – баланс никогда не уходит в минус."""
     async with aiosqlite.connect(DB_NAME) as db:
-        # Получаем текущий баланс
         cursor = await db.execute("SELECT balance FROM players WHERE user_id = ?", (user_id,))
         row = await cursor.fetchone()
         if not row:
             return
         current_balance = row[0]
         new_balance = current_balance + amount
-        # Если уходим в минус — срезаем до 0 и корректируем amount
         if new_balance < 0:
-            amount = -current_balance  # списываем всё, что есть
+            amount = -current_balance
             new_balance = 0
 
         await db.execute(
@@ -572,6 +570,7 @@ async def calculate_business_income(business: Dict) -> int:
     return base + bonus
 
 async def collect_business_income(user_id: int) -> int:
+    """Собирает доход со всех бизнесов, у которых прошёл час. Возвращает сумму."""
     businesses = await get_user_businesses(user_id)
     total_income = 0
     now = datetime.now()
@@ -610,6 +609,52 @@ async def collect_business_income(user_id: int) -> int:
         await update_balance(user_id, total_income, 'business_income', 'Пассивный доход с бизнесов')
 
     return total_income
+
+async def get_business_collect_status(user_id: int) -> Dict[str, Any]:
+    """
+    Возвращает статус сбора дохода:
+    - total_income: сколько можно собрать сейчас (0 если ничего)
+    - can_collect: bool (есть ли хоть один бизнес с готовым доходом)
+    - next_collect_time: datetime самого близкого бизнеса, который станет доступен
+    - seconds_left: секунд до следующего сбора (если can_collect=False)
+    - total_per_hour: общий доход в час
+    """
+    businesses = await get_user_businesses(user_id)
+    total_per_hour = 0
+    now = datetime.now()
+    next_collect_time = None
+    total_income_now = 0
+
+    for biz in businesses:
+        income = await calculate_business_income(biz)
+        total_per_hour += income
+
+        last_collect = biz.get('collect_cooldown')
+        if not last_collect:
+            total_income_now += income
+            continue
+
+        last_time = safe_parse_datetime(last_collect)
+        if not last_time:
+            total_income_now += income
+            continue
+
+        time_passed = (now - last_time).total_seconds()
+        if time_passed >= 3600:
+            total_income_now += income
+        else:
+            collect_available = last_time + timedelta(hours=1)
+            if next_collect_time is None or collect_available < next_collect_time:
+                next_collect_time = collect_available
+
+    result = {
+        "total_income": total_income_now,
+        "can_collect": total_income_now > 0,
+        "total_per_hour": total_per_hour,
+        "next_collect_time": next_collect_time,
+        "seconds_left": int((next_collect_time - now).total_seconds()) if next_collect_time and not total_income_now else 0
+    }
+    return result
 
 async def get_business_upgrades(business_id: int) -> List[Dict]:
     async with aiosqlite.connect(DB_NAME) as db:
@@ -1100,7 +1145,7 @@ async def handle_check_activation(message: Message, check_id: str):
     )
     await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
-# ----- ЗАРПЛАТА (ИНТЕГРИРОВАН БИЗНЕС-БОНУС) -----
+# ----- ЗАРПЛАТА -----
 @dp.message(F.text == "💰 Получка")
 async def handle_paycheck(message: Message):
     user_id = message.from_user.id
@@ -1179,6 +1224,7 @@ async def handle_paycheck(message: Message):
         response += f"💬 *Виталик:* '{random.choice(comments)}'"
     await message.answer(response, parse_mode="Markdown")
 
+# ----- МАГАЗИН -----
 @dp.message(F.text == "🛒 Магазин")
 async def handle_shop(message: Message):
     user_id = message.from_user.id
@@ -1414,7 +1460,7 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
         await message.answer("❌ Произошла ошибка, попробуйте еще раз")
     await state.clear()
 
-# ----- АСФАЛЬТ (ИНТЕГРИРОВАН БИЗНЕС-БОНУС) -----
+# ----- АСФАЛЬТ -----
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -1742,7 +1788,6 @@ async def duel_confirm_challenge(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("❌ Не удалось отправить вызов. Возможно, противник заблокировал бота.")
         await state.clear()
 
-# 🔥 ИСПРАВЛЕННАЯ ДУЭЛЬ – БАЛАНС НЕ УХОДИТ В МИНУС
 @dp.callback_query(F.data.startswith("duel_accept_"))
 async def duel_accept(callback: CallbackQuery):
     acceptor_id = callback.from_user.id
@@ -1761,7 +1806,7 @@ async def duel_accept(callback: CallbackQuery):
         await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
 
-    # 🔐 ЖЁСТКАЯ ПРОВЕРКА БАЛАНСА – НИКАКИХ МИНУСОВ!
+    # Жёсткая проверка баланса
     if challenger['balance'] < bet:
         await callback.message.edit_text("❌ У противника уже нет денег для дуэли. Вызов отменён.")
         return
@@ -1769,7 +1814,7 @@ async def duel_accept(callback: CallbackQuery):
         await callback.message.edit_text("❌ У вас недостаточно средств для участия в дуэли.")
         return
 
-    # ✅ СПИСЫВАЕМ СТАВКИ ЧЕРЕЗ update_balance (с защитой от минуса)
+    # Списываем ставки через update_balance (с защитой от минуса)
     await update_balance(challenger_id, -bet, "duel_bet", f"Ставка в дуэли против {acceptor['full_name']}")
     await update_balance(acceptor_id, -bet, "duel_bet", f"Ставка в дуэли против {challenger['full_name']}")
 
@@ -1890,7 +1935,7 @@ async def duel_roll(callback: CallbackQuery):
             winner_roll = acceptor_roll
             loser_roll = challenger_roll
         else:
-            # НИЧЬЯ – возвращаем ставки
+            # Ничья – возвращаем ставки
             await update_balance(duel["challenger_id"], bet, "duel_refund", "Возврат ставки (ничья)")
             await update_balance(duel["acceptor_id"], bet, "duel_refund", "Возврат ставки (ничья)")
             await bot.send_message(
@@ -1911,10 +1956,10 @@ async def duel_roll(callback: CallbackQuery):
             await callback.answer()
             return
 
-        # 🏆 ПОБЕДИТЕЛЬ – начисляем удвоенную ставку (свою + противника)
+        # Победитель получает удвоенную ставку
         prize = bet * 2
         await update_balance(winner_id, prize, "duel_win", f"Победа в дуэли против {loser_name}, ставка {bet}")
-        # У проигравшего ставка уже списана, ничего дополнительно не списываем
+        # У проигравшего ставка уже списана
 
         await bot.send_message(
             winner_id,
@@ -1945,9 +1990,9 @@ async def duel_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-# ==================== БИЗНЕС-СИСТЕМА (ПОЛНЫЙ ИНТЕРФЕЙС, ИСПРАВЛЕНА) ====================
+# ==================== БИЗНЕС-СИСТЕМА (ПОЛНЫЙ ИНТЕРФЕЙС С ТАЙМЕРОМ) ====================
 async def cmd_business_menu(target: Union[Message, CallbackQuery], user_id: int = None):
-    """Универсальная функция для показа меню бизнесов. Работает и из сообщения, и из callback."""
+    """Универсальная функция для показа меню бизнесов."""
     if isinstance(target, CallbackQuery):
         message = target.message
         if user_id is None:
@@ -1968,17 +2013,29 @@ async def cmd_business_menu(target: Union[Message, CallbackQuery], user_id: int 
         return
 
     biz_list = await get_user_businesses(user_id)
-    total_income = 0
-    for biz in biz_list:
-        total_income += await calculate_business_income(biz)
+    status = await get_business_collect_status(user_id)
 
     text = (
         f"🏢 *КОРПОРАЦИЯ ВИТАЛИКА*\n\n"
         f"💰 Баланс: {format_money(user['balance'])}\n"
         f"🏭 Твоих бизнесов: {len(biz_list)}\n"
-        f"💵 Пассивный доход: {format_money(total_income)}/час\n\n"
+        f"💵 Пассивный доход: {format_money(status['total_per_hour'])}/час\n\n"
     )
 
+    if status['can_collect']:
+        text += f"✅ *Доступно к сбору:* {format_money(status['total_income'])}\n"
+        collect_text = "💰 Собрать доход"
+    else:
+        if status['seconds_left'] > 0:
+            minutes = status['seconds_left'] // 60
+            seconds = status['seconds_left'] % 60
+            time_str = f"{minutes} мин {seconds} сек"
+            text += f"⏳ *Следующий сбор:* через {time_str}\n"
+        else:
+            text += "⏳ *Следующий сбор:* скоро...\n"
+        collect_text = "⏳ Сбор недоступен"
+
+    text += f"\n{'—' * 20}\n"
     if biz_list:
         text += "Управляй империей 👇"
     else:
@@ -1987,8 +2044,12 @@ async def cmd_business_menu(target: Union[Message, CallbackQuery], user_id: int 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Купить бизнес", callback_data="biz_shop")],
         [InlineKeyboardButton(text="📋 Мои предприятия", callback_data="biz_my")],
-        [InlineKeyboardButton(text="💰 Собрать доход", callback_data="biz_collect")]
     ])
+
+    if status['can_collect']:
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text=collect_text, callback_data="biz_collect")])
+    else:
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text=collect_text, callback_data="biz_collect_wait")])
 
     if is_callback:
         await target.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -2156,10 +2217,37 @@ async def biz_collect(callback: CallbackQuery):
     amount = await collect_business_income(user_id)
 
     if amount > 0:
+        status = await get_business_collect_status(user_id)
         await callback.answer(f"💰 Собрано {format_money(amount)}!", show_alert=False)
+
+        text = (
+            f"💰 *ДОХОД СОБРАН!*\n\n"
+            f"✅ Вы получили: {format_money(amount)}\n"
+            f"💵 Текущий пассивный доход: {format_money(status['total_per_hour'])}/час\n\n"
+            f"⏳ *Следующий сбор:* через 1 час\n"
+            f"📅 (после нажатия кнопки)"
+        )
+        await callback.message.answer(text, parse_mode="Markdown")
         await cmd_business_menu(callback, user_id=user_id)
     else:
         await callback.answer("❌ Нет дохода для сбора (кулдаун 1 час)", show_alert=True)
+
+@dp.callback_query(F.data == "biz_collect_wait")
+async def biz_collect_wait(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    status = await get_business_collect_status(user_id)
+    if status['can_collect']:
+        # Уже можно собрать, обновим меню
+        await cmd_business_menu(callback, user_id=user_id)
+        await callback.answer()
+        return
+
+    if status['seconds_left'] > 0:
+        minutes = status['seconds_left'] // 60
+        seconds = status['seconds_left'] % 60
+        await callback.answer(f"⏳ До сбора: {minutes} мин {seconds} сек", show_alert=True)
+    else:
+        await callback.answer("⏳ Скоро будет доступно...", show_alert=True)
 
 @dp.callback_query(F.data == "biz_back_to_menu")
 async def biz_back_to_menu(callback: CallbackQuery):
@@ -2171,9 +2259,22 @@ async def cmd_collect(message: Message):
     user_id = message.from_user.id
     amount = await collect_business_income(user_id)
     if amount > 0:
-        await message.answer(f"💰 Собрано {format_money(amount)} с бизнесов!")
+        status = await get_business_collect_status(user_id)
+        text = (
+            f"💰 *ДОХОД СОБРАН!*\n\n"
+            f"✅ Вы получили: {format_money(amount)}\n"
+            f"💵 Текущий пассивный доход: {format_money(status['total_per_hour'])}/час\n\n"
+            f"⏳ *Следующий сбор:* через 1 час"
+        )
+        await message.answer(text, parse_mode="Markdown")
     else:
-        await message.answer("❌ Нет дохода для сбора (кулдаун 1 час)")
+        status = await get_business_collect_status(user_id)
+        if status['seconds_left'] > 0:
+            minutes = status['seconds_left'] // 60
+            seconds = status['seconds_left'] % 60
+            await message.answer(f"❌ Нет дохода для сбора.\n⏳ Следующий сбор через {minutes} мин {seconds} сек.")
+        else:
+            await message.answer("❌ Нет дохода для сбора (возможно, нет бизнесов или кулдаун 1 час).")
 
 # ==================== ПЕРЕВОДЫ ====================
 @dp.message(F.text == "🔁 Перевод")
@@ -3183,7 +3284,7 @@ async def cmd_broadcast(message: Message, state: FSMContext):
     await state.set_state(BroadcastStates.waiting_for_message)
 
 @dp.message(Command("bonus"))
-async def cmd_bonus(message: Message, state: FSMContext):
+async def cmd_bonus(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     args = message.text.split()
@@ -3203,7 +3304,7 @@ async def cmd_bonus(message: Message, state: FSMContext):
         await message.answer("❌ Неверный формат ID или суммы")
 
 @dp.message(Command("fine"))
-async def cmd_fine(message: Message, state: FSMContext):
+async def cmd_fine(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     args = message.text.split()
@@ -3232,7 +3333,7 @@ async def on_startup():
     else:
         logger.info(f"✅ Username бота: @{bot_info.username}")
     asyncio.create_task(penalty_scheduler())
-    logger.info("✅ Бот запущен! БИЗНЕС-СИСТЕМА АКТИВИРОВАНА.")
+    logger.info("✅ Бот запущен! БИЗНЕС-СИСТЕМА С ТАЙМЕРОМ АКТИВИРОВАНА.")
 
 async def on_shutdown():
     logger.info("🛑 Бот останавливается...")
