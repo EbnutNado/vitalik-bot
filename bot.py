@@ -1,6 +1,6 @@
 """
 Telegram бот "Виталик Штрафующий"
-✅ Чеки исправлены | ✅ Дуэль пошаговая (без дублей) | ✅ Нагирт ужесточён
+✅ Чеки исправлены | ✅ Дуэль пошаговая | ✅ Нагирт ужесточён | ✅ БИЗНЕС-СИСТЕМА
 """
 
 import asyncio
@@ -22,8 +22,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import aiosqlite
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
-ADMIN_ID = 5775839902
+BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"  # ЗАМЕНИ НА СВОЙ!
+ADMIN_ID = 5775839902  # ЗАМЕНИ НА СВОЙ ID
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -73,17 +73,14 @@ SHOP_ITEMS = [
      "description": "+15% к зарплате, +20% к играм на 2 часа. Риск штрафа +10%",
      "type": "pill", "effect_salary": 0.15, "effect_game": 0.2, "hours": 2,
      "side_effect_chance": 25, "fine_bonus": 0.1},
-
     {"id": "nagirt_pro", "name": "💊💊 Нагирт Про", "price": 5000,
      "description": "+30% к зарплате, +40% к играм на 4 часа. Риск штрафа +25%",
      "type": "pill", "effect_salary": 0.30, "effect_game": 0.4, "hours": 4,
      "side_effect_chance": 50, "fine_bonus": 0.25},
-
     {"id": "nagirt_extreme", "name": "💊💊💊 Нагирт Экстрим", "price": 12000,
      "description": "+50% к зарплате, +70% к играм на 6 часов. Риск штрафа +40%",
      "type": "pill", "effect_salary": 0.50, "effect_game": 0.7, "hours": 6,
      "side_effect_chance": 75, "fine_bonus": 0.4},
-
     {"id": "antidote", "name": "💉 Антидот", "price": 2500,
      "description": "Снимает побочки и сбрасывает толерантность", "type": "antidote"},
     {"id": "lottery_ticket", "name": "🎫 Лотерейный билет", "price": 1000,
@@ -92,11 +89,136 @@ SHOP_ITEMS = [
      "description": "Сразу получаешь зарплату без ожидания", "type": "instant"},
 ]
 
+# ==================== БИЗНЕСЫ ====================
+BUSINESS_TYPES = {
+    "chair": {
+        "name": "🪑 Офисное кресло",
+        "description": "Мягкое, с подлокотниками. Начальник оценит.",
+        "price": 3000,
+        "base_income": 30,
+        "salary_bonus": 0.01,
+        "duel_bonus": 0.0,
+        "asphalt_bonus": 0.0,
+        "max_level": 3,
+        "upgrades": {
+            1: {"name": "Газлифт", "cost": 2000, "income_bonus": 10, "desc": "+10₽/ч"},
+            2: {"name": "Массажная спинка", "cost": 5000, "income_bonus": 20, "desc": "+20₽/ч"},
+            3: {"name": "Кожаная обивка", "cost": 8000, "income_bonus": 30, "salary_bonus": 0.005, "desc": "+30₽/ч, +0.5% зарплата"}
+        }
+    },
+    "pc": {
+        "name": "💻 Игровой ПК",
+        "description": "RTX 5090, Intel i9. Для работы, конечно.",
+        "price": 10000,
+        "base_income": 150,
+        "salary_bonus": 0.02,
+        "duel_bonus": 0.01,
+        "asphalt_bonus": 0.0,
+        "max_level": 5,
+        "upgrades": {
+            1: {"name": "SSD на 1TB", "cost": 3000, "income_bonus": 40, "desc": "+40₽/ч"},
+            2: {"name": "Механическая клавиатура", "cost": 5000, "income_bonus": 60, "duel_bonus": 0.01, "desc": "+60₽/ч, +1% дуэль"},
+            3: {"name": "Жидкостное охлаждение", "cost": 8000, "income_bonus": 80, "desc": "+80₽/ч"},
+            4: {"name": "RGB подсветка", "cost": 3000, "income_bonus": 20, "salary_bonus": 0.005, "desc": "+20₽/ч, +0.5% ЗП"},
+            5: {"name": "VR-шлем", "cost": 15000, "income_bonus": 120, "duel_bonus": 0.02, "desc": "+120₽/ч, +2% дуэль"}
+        }
+    },
+    "vending": {
+        "name": "☕ Вендинговый аппарат",
+        "description": "Кофе, снэки, доширак. Весь офис твой должник.",
+        "price": 25000,
+        "base_income": 400,
+        "salary_bonus": 0.03,
+        "duel_bonus": 0.0,
+        "asphalt_bonus": 0.0,
+        "max_level": 4,
+        "upgrades": {
+            1: {"name": "Кофе-машина", "cost": 8000, "income_bonus": 100, "desc": "+100₽/ч"},
+            2: {"name": "Снэк-стеллаж", "cost": 12000, "income_bonus": 150, "desc": "+150₽/ч"},
+            3: {"name": "Платежный терминал", "cost": 15000, "income_bonus": 200, "salary_bonus": 0.01, "desc": "+200₽/ч, +1% ЗП"},
+            4: {"name": "Холодильная камера", "cost": 20000, "income_bonus": 250, "desc": "+250₽/ч"}
+        }
+    },
+    "kiosk": {
+        "name": "🏪 Ларёк у дома",
+        "description": "Пиво, семечки, сим-карты. Торгуй, пока Виталик не пришёл.",
+        "price": 60000,
+        "base_income": 1200,
+        "salary_bonus": 0.05,
+        "duel_bonus": 0.0,
+        "asphalt_bonus": 0.0,
+        "max_level": 5,
+        "upgrades": {
+            1: {"name": "Вывеска", "cost": 15000, "income_bonus": 300, "desc": "+300₽/ч"},
+            2: {"name": "Охрана", "cost": 25000, "income_bonus": 450, "desc": "+450₽/ч"},
+            3: {"name": "Разливное пиво", "cost": 35000, "income_bonus": 600, "salary_bonus": 0.015, "desc": "+600₽/ч, +1.5% ЗП"},
+            4: {"name": "Терминал оплаты", "cost": 20000, "income_bonus": 350, "desc": "+350₽/ч"},
+            5: {"name": "Франшиза", "cost": 50000, "income_bonus": 800, "salary_bonus": 0.02, "desc": "+800₽/ч, +2% ЗП"}
+        }
+    },
+    "truck": {
+        "name": "🚛 Грузовой транспорт",
+        "description": "Газель, рефрижератор, права с открытой категорией.",
+        "price": 120000,
+        "base_income": 2500,
+        "salary_bonus": 0.07,
+        "duel_bonus": 0.0,
+        "asphalt_bonus": 0.10,
+        "max_level": 5,
+        "upgrades": {
+            1: {"name": "Новые шины", "cost": 25000, "income_bonus": 500, "asphalt_bonus": 0.02, "desc": "+500₽/ч, +2% асфальт"},
+            2: {"name": "Тахограф", "cost": 30000, "income_bonus": 700, "desc": "+700₽/ч"},
+            3: {"name": "Рефрижератор", "cost": 50000, "income_bonus": 1000, "asphalt_bonus": 0.03, "desc": "+1000₽/ч, +3% асфальт"},
+            4: {"name": "GPS-навигатор", "cost": 20000, "income_bonus": 400, "asphalt_bonus": 0.02, "desc": "+400₽/ч, +2% асфальт"},
+            5: {"name": "Автопарк +1", "cost": 80000, "income_bonus": 1500, "salary_bonus": 0.02, "desc": "+1500₽/ч, +2% ЗП"}
+        }
+    },
+    "factory": {
+        "name": "🏭 Мини-завод",
+        "description": "Штампуй детали, печатай деньги.",
+        "price": 300000,
+        "base_income": 6000,
+        "salary_bonus": 0.10,
+        "duel_bonus": 0.0,
+        "asphalt_bonus": 0.0,
+        "max_level": 6,
+        "upgrades": {
+            1: {"name": "Автоматизация", "cost": 60000, "income_bonus": 1500, "desc": "+1500₽/ч"},
+            2: {"name": "Роботизация", "cost": 90000, "income_bonus": 2000, "salary_bonus": 0.02, "desc": "+2000₽/ч, +2% ЗП"},
+            3: {"name": "Склад", "cost": 70000, "income_bonus": 1800, "desc": "+1800₽/ч"},
+            4: {"name": "Конвейер", "cost": 80000, "income_bonus": 2200, "salary_bonus": 0.02, "desc": "+2200₽/ч, +2% ЗП"},
+            5: {"name": "ИИ-контроль", "cost": 120000, "income_bonus": 3000, "desc": "+3000₽/ч"},
+            6: {"name": "Экспорт", "cost": 150000, "income_bonus": 4000, "salary_bonus": 0.03, "desc": "+4000₽/ч, +3% ЗП"}
+        }
+    },
+    "office": {
+        "name": "🏢 Бизнес-центр",
+        "description": "Сдавай этажи, собирай аренду. Вершина карьеры.",
+        "price": 1000000,
+        "base_income": 20000,
+        "salary_bonus": 0.15,
+        "duel_bonus": 0.05,
+        "asphalt_bonus": 0.05,
+        "max_level": 8,
+        "upgrades": {
+            1: {"name": "Охрана", "cost": 150000, "income_bonus": 4000, "desc": "+4000₽/ч"},
+            2: {"name": "IT-инфраструктура", "cost": 200000, "income_bonus": 6000, "salary_bonus": 0.02, "desc": "+6000₽/ч, +2% ЗП"},
+            3: {"name": "Фитнес-зал", "cost": 180000, "income_bonus": 5000, "duel_bonus": 0.01, "desc": "+5000₽/ч, +1% дуэль"},
+            4: {"name": "Ресепшн", "cost": 120000, "income_bonus": 3500, "desc": "+3500₽/ч"},
+            5: {"name": "Конференц-зал", "cost": 250000, "income_bonus": 7000, "salary_bonus": 0.03, "desc": "+7000₽/ч, +3% ЗП"},
+            6: {"name": "Кафетерий", "cost": 180000, "income_bonus": 5500, "asphalt_bonus": 0.02, "desc": "+5500₽/ч, +2% асфальт"},
+            7: {"name": "Панорамные лифты", "cost": 200000, "income_bonus": 6000, "duel_bonus": 0.02, "desc": "+6000₽/ч, +2% дуэль"},
+            8: {"name": "Корпоративный музей", "cost": 300000, "income_bonus": 9000, "salary_bonus": 0.04, "desc": "+9000₽/ч, +4% ЗП"}
+        }
+    }
+}
+
 # ==================== БАЗА ДАННЫХ ====================
 DB_NAME = "vitalik_bot_final.db"
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
+        # Существующие таблицы
         await db.execute('''
             CREATE TABLE IF NOT EXISTS players (
                 user_id INTEGER PRIMARY KEY,
@@ -187,8 +309,38 @@ async def init_db():
                 received_item TEXT
             )
         ''')
+
+        # НОВЫЕ ТАБЛИЦЫ ДЛЯ БИЗНЕСОВ
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS businesses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                biz_type TEXT NOT NULL,
+                level INTEGER DEFAULT 1,
+                upgrade_level INTEGER DEFAULT 0,
+                base_income INTEGER NOT NULL,
+                collect_cooldown TIMESTAMP,
+                health INTEGER DEFAULT 100,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (owner_id) REFERENCES players(user_id) ON DELETE CASCADE
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS business_upgrades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                business_id INTEGER NOT NULL,
+                upgrade_name TEXT NOT NULL,
+                upgrade_level INTEGER NOT NULL,
+                bonus_income INTEGER DEFAULT 0,
+                bonus_percent REAL DEFAULT 0.0,
+                cost INTEGER NOT NULL,
+                purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+            )
+        ''')
         await db.commit()
-        logger.info("✅ База данных инициализирована")
+        logger.info("✅ База данных инициализирована (с бизнесами)")
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def safe_parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
@@ -271,7 +423,7 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
             (user_id, datetime.now().isoformat())
         )
         rows = await cursor.fetchall()
-    
+
     effects = {
         "salary_boost": 0.0,
         "game_boost": 0.0,
@@ -279,7 +431,7 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
         "has_active": len(rows) > 0,
         "fine_chance_mod": 0.0
     }
-    
+
     for row in rows:
         pill_type, strength, side_effects = row
         if pill_type == "nagirt_light":
@@ -296,7 +448,7 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
             effects["fine_chance_mod"] += 0.4
         if side_effects:
             effects["side_effects"].append(side_effects)
-    
+
     return effects
 
 async def get_nagirt_tolerance(user_id: int) -> float:
@@ -354,6 +506,175 @@ async def has_fine_protection(user_id: int) -> bool:
         result = await cursor.fetchone()
         return result is not None
 
+# ==================== БИЗНЕС-ФУНКЦИИ ====================
+async def get_user_businesses(user_id: int) -> List[Dict]:
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM businesses WHERE owner_id = ? AND is_active = 1 ORDER BY created_at DESC",
+            (user_id,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+async def buy_business(user_id: int, biz_key: str) -> tuple[bool, str]:
+    biz = BUSINESS_TYPES.get(biz_key)
+    if not biz:
+        return False, "❌ Такого бизнеса нет."
+
+    user = await get_user(user_id)
+    if not user:
+        return False, "❌ Сначала зарегистрируйся."
+
+    if user['balance'] < biz['price']:
+        return False, f"❌ Не хватает денег. Нужно {format_money(biz['price'])}."
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO businesses (owner_id, biz_type, base_income) VALUES (?, ?, ?)",
+            (user_id, biz_key, biz['base_income'])
+        )
+        await db.execute(
+            "UPDATE players SET balance = balance - ? WHERE user_id = ?",
+            (biz['price'], user_id)
+        )
+        await db.execute(
+            "INSERT INTO transactions (user_id, type, amount, description) VALUES (?, 'business_buy', -?, ?)",
+            (user_id, biz['price'], f"Покупка {biz['name']}")
+        )
+        await db.commit()
+
+    return True, "✅ Бизнес куплен!"
+
+async def calculate_business_income(business: Dict) -> int:
+    biz_config = BUSINESS_TYPES[business['biz_type']]
+    base = business['base_income']
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT SUM(bonus_income) FROM business_upgrades WHERE business_id = ?",
+            (business['id'],)
+        )
+        row = await cursor.fetchone()
+        bonus = row[0] if row and row[0] else 0
+    return base + bonus
+
+async def collect_business_income(user_id: int) -> int:
+    businesses = await get_user_businesses(user_id)
+    total_income = 0
+    now = datetime.now()
+
+    for biz in businesses:
+        last_collect = biz.get('collect_cooldown')
+        if last_collect:
+            last_time = safe_parse_datetime(last_collect)
+            if last_time and (now - last_time).total_seconds() < 3600:
+                continue
+
+        income_per_hour = await calculate_business_income(biz)
+        total_income += income_per_hour
+
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                "UPDATE businesses SET collect_cooldown = ? WHERE id = ?",
+                (now.isoformat(), biz['id'])
+            )
+            await db.commit()
+
+    if total_income > 0:
+        # Налог Виталика (15%)
+        if random.random() < 0.15:
+            tax = int(total_income * 0.3)
+            total_income -= tax
+            await update_balance(user_id, -tax, 'vitalik_tax', 'Конфискация Виталика за бизнес')
+            await bot.send_message(user_id,
+                f"🚨 *ВИТАЛИК НАГРЯНУЛ!*\n\n"
+                f"Налоговая проверила твой бизнес.\n"
+                f"Конфисковано: {format_money(tax)}\n"
+                f"Осталось дохода: {format_money(total_income)}",
+                parse_mode="Markdown"
+            )
+
+        await update_balance(user_id, total_income, 'business_income', 'Пассивный доход с бизнесов')
+
+    return total_income
+
+async def get_business_upgrades(business_id: int) -> List[Dict]:
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM business_upgrades WHERE business_id = ? ORDER BY upgrade_level",
+            (business_id,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+async def upgrade_business(user_id: int, business_id: int, upgrade_lvl: int) -> tuple[bool, str]:
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM businesses WHERE id = ? AND owner_id = ?",
+                                 (business_id, user_id))
+        biz = await cursor.fetchone()
+        if not biz:
+            return False, "❌ Бизнес не найден или не принадлежит тебе."
+        biz = dict(biz)
+
+    config = BUSINESS_TYPES[biz['biz_type']]
+    upgrade = config['upgrades'].get(upgrade_lvl)
+    if not upgrade:
+        return False, "❌ Улучшение не найдено."
+
+    existing = await get_business_upgrades(business_id)
+    if any(u['upgrade_level'] == upgrade_lvl for u in existing):
+        return False, "❌ Это улучшение уже установлено."
+
+    if biz['upgrade_level'] + 1 != upgrade_lvl:
+        return False, f"❌ Сначала нужно улучшить до уровня {biz['upgrade_level'] + 1}."
+
+    user = await get_user(user_id)
+    if user['balance'] < upgrade['cost']:
+        return False, f"❌ Не хватает {format_money(upgrade['cost'])}."
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            '''INSERT INTO business_upgrades
+               (business_id, upgrade_name, upgrade_level, bonus_income, bonus_percent, cost)
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (business_id, upgrade['name'], upgrade_lvl,
+             upgrade.get('income_bonus', 0),
+             upgrade.get('salary_bonus', 0.0) + upgrade.get('duel_bonus', 0.0) + upgrade.get('asphalt_bonus', 0.0),
+             upgrade['cost'])
+        )
+        await db.execute(
+            "UPDATE businesses SET upgrade_level = ? WHERE id = ?",
+            (upgrade_lvl, business_id)
+        )
+        await db.execute(
+            "UPDATE players SET balance = balance - ? WHERE user_id = ?",
+            (upgrade['cost'], user_id)
+        )
+        await db.execute(
+            "INSERT INTO transactions (user_id, type, amount, description) VALUES (?, 'business_upgrade', -?, ?)",
+            (user_id, upgrade['cost'], f"Улучшение {upgrade['name']} для {config['name']}")
+        )
+        await db.commit()
+
+    return True, f"✅ Улучшение '{upgrade['name']}' установлено!"
+
+async def get_total_business_bonuses(user_id: int) -> Dict[str, float]:
+    businesses = await get_user_businesses(user_id)
+    bonuses = {"salary": 0.0, "duel": 0.0, "asphalt": 0.0}
+
+    for biz in businesses:
+        config = BUSINESS_TYPES[biz['biz_type']]
+        bonuses["salary"] += config.get('salary_bonus', 0.0)
+        bonuses["duel"] += config.get('duel_bonus', 0.0)
+        bonuses["asphalt"] += config.get('asphalt_bonus', 0.0)
+
+        upgrades = await get_business_upgrades(biz['id'])
+        for up in upgrades:
+            bonuses["salary"] += up.get('bonus_percent', 0.0)
+    return bonuses
+
 # ==================== ФОРМАТИРОВАНИЕ ====================
 def format_money(amount: int) -> str:
     return f"{amount:,}₽".replace(",", " ")
@@ -368,7 +689,8 @@ def get_main_keyboard(user_id: int = None) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="💰 Получка"), KeyboardButton(text="🛒 Магазин")],
         [KeyboardButton(text="🔁 Перевод"), KeyboardButton(text="🎮 Мини-игры")],
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💊 Эффекты")]
+        [KeyboardButton(text="🏢 Бизнес"), KeyboardButton(text="📊 Статистика")],
+        [KeyboardButton(text="💊 Эффекты")]
     ]
     if user_id == ADMIN_ID:
         keyboard.append([KeyboardButton(text="👑 Админ-панель")])
@@ -380,7 +702,7 @@ def get_shop_keyboard() -> InlineKeyboardMarkup:
     pills = [item for item in SHOP_ITEMS if item.get("type") == "pill"]
     protection = [item for item in SHOP_ITEMS if item.get("type") in ["protection", "insurance"]]
     other = [item for item in SHOP_ITEMS if item.get("type") in ["antidote", "lottery", "instant"]]
-    
+
     if boosts:
         buttons.append([InlineKeyboardButton(text="📈 БУСТЫ К ЗАРПЛАТЕ", callback_data="none")])
         for item in boosts:
@@ -467,8 +789,7 @@ def get_items_for_checks() -> InlineKeyboardMarkup:
             buttons.append([InlineKeyboardButton(text=f"{item['name']}", callback_data=f"check_item_{item['id']}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_check_item")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-# ==================== МАШИНЫ СОСТОЯНИЙ ====================
+    # ==================== МАШИНЫ СОСТОЯНИЙ ====================
 class TransferStates(StatesGroup):
     choosing_recipient = State()
     entering_amount = State()
@@ -500,7 +821,7 @@ class DuelStates(StatesGroup):
 
 # ==================== АКТИВНЫЕ ДУЭЛИ ====================
 active_duels = {}
-DUEL_TIMEOUT = 60  # секунд на ход
+DUEL_TIMEOUT = 60
 
 # ==================== СИСТЕМА ЧЕКОВ ====================
 def generate_check_id() -> str:
@@ -545,7 +866,7 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
         already_used = await cursor.fetchone()
         if already_used:
             return {"success": False, "error": "Вы уже активировали этот чек"}
-        
+
         await db.execute('''
             UPDATE gift_checks 
             SET used_count = used_count + 1, last_used = ?
@@ -556,11 +877,11 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
             VALUES (?, ?, ?)
         ''', (check_id, user_id, datetime.now().isoformat()))
         await db.commit()
-        
+
         reward_text = ""
         success = True
         error_message = None
-        
+
         try:
             if check['check_type'] == 'money':
                 amount = check['amount']
@@ -593,13 +914,13 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
             logger.error(f"Ошибка выдачи награды чека {check_id}: {e}")
             success = False
             error_message = "Техническая ошибка при активации"
-        
+
         cursor = await db.execute('''
             SELECT full_name FROM players WHERE user_id = ?
         ''', (check['creator_id'],))
         creator = await cursor.fetchone()
         creator_name = creator[0] if creator else "Администрация"
-        
+
         return {
             "success": success,
             "amount": check.get('amount'),
@@ -695,6 +1016,7 @@ async def cmd_start(message: Message):
         f"• 🔁 Переводы между сотрудниками\n"
         f"• 🎮 Мини-игры (рулетка, асфальт, ДУЭЛЬ)\n"
         f"• 💊 Таблетки Нагирт (риск/награда)\n"
+        f"• 🏢 БИЗНЕСЫ — пассивный доход, бонусы, прокачка!\n"
         f"• 📊 Статистика и рейтинг\n\n"
     )
     if tolerance > 1.0:
@@ -730,6 +1052,7 @@ async def handle_check_activation(message: Message, check_id: str):
             f"• 🔁 Переводы между сотрудниками\n"
             f"• 🎮 Мини-игры (рулетка, асфальт, ДУЭЛЬ)\n"
             f"• 💊 Таблетки Нагирт (риск/награда)\n"
+            f"• 🏢 БИЗНЕСЫ — пассивный доход, бонусы, прокачка!\n"
             f"• 📊 Статистика и рейтинг\n\n"
         )
         if tolerance > 1.0:
@@ -758,11 +1081,13 @@ async def handle_check_activation(message: Message, check_id: str):
         f"• 💰 Получка каждые 5 минут\n"
         f"• 🛒 Магазин с бустами и таблетками\n"
         f"• 🎮 Мини-игры (рулетка, асфальт, ДУЭЛЬ)\n"
-        f"• 🔁 Переводы другим игрокам\n\n"
+        f"• 🔁 Переводы другим игрокам\n"
+        f"• 🏢 Бизнес-империя — пассивный доход!\n\n"
         f"*Добро пожаловать в компанию Виталика!* 👔"
     )
     await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
+# ----- ЗАРПЛАТА (ИНТЕГРИРОВАН БИЗНЕС-БОНУС) -----
 @dp.message(F.text == "💰 Получка")
 async def handle_paycheck(message: Message):
     user_id = message.from_user.id
@@ -773,19 +1098,24 @@ async def handle_paycheck(message: Message):
     current_time = datetime.now()
     last_salary = user.get('last_salary')
     if last_salary:
-        last_salary_time = datetime.fromisoformat(last_salary)
-        time_since_last = current_time - last_salary_time
-        min_wait = timedelta(seconds=ECONOMY_SETTINGS["salary_interval"])
-        if time_since_last < min_wait:
-            wait_seconds = int((min_wait - time_since_last).total_seconds())
-            wait_time = format_time(wait_seconds)
-            await message.answer(f"⏳ *Слишком рано!*\n\nЖди еще *{wait_time}* (мм:сс)")
-            return
+        last_salary_time = safe_parse_datetime(last_salary)
+        if last_salary_time:
+            time_since_last = current_time - last_salary_time
+            min_wait = timedelta(seconds=ECONOMY_SETTINGS["salary_interval"])
+            if time_since_last < min_wait:
+                wait_seconds = int((min_wait - time_since_last).total_seconds())
+                wait_time = format_time(wait_seconds)
+                await message.answer(f"⏳ *Слишком рано!*\n\nЖди еще *{wait_time}* (мм:сс)")
+                return
+
     await cleanup_expired()
     boost_multiplier = await get_active_boosts(user_id)
     nagirt_effects = await get_active_nagirt_effects(user_id)
+    biz_bonuses = await get_total_business_bonuses(user_id)
+    salary_bonus = biz_bonuses["salary"]
+
     base_salary = random.randint(ECONOMY_SETTINGS["salary_min"], ECONOMY_SETTINGS["salary_max"])
-    
+
     pill_fine = 0
     if nagirt_effects["has_active"]:
         actual_fine_chance = ECONOMY_SETTINGS["fine_chance"] + nagirt_effects.get("fine_chance_mod", 0)
@@ -799,8 +1129,8 @@ async def handle_paycheck(message: Message):
                 "Прогул после приёма Нагирта!"
             ]
             await update_balance(user_id, -pill_fine, "penalty", f"💊 {random.choice(fine_reasons)}")
-    
-    total_multiplier = 1.0 + boost_multiplier + nagirt_effects["salary_boost"]
+
+    total_multiplier = 1.0 + boost_multiplier + nagirt_effects["salary_boost"] + salary_bonus
     final_salary = int(base_salary * total_multiplier)
     await update_balance(user_id, final_salary, "salary", f"💸 Зарплата (x{total_multiplier:.2f})")
     async with aiosqlite.connect(DB_NAME) as db:
@@ -815,6 +1145,8 @@ async def handle_paycheck(message: Message):
         details.append(f"Бусты: +{int(boost_multiplier*100)}%")
     if nagirt_effects["salary_boost"] > 0:
         details.append(f"Нагирт: +{int(nagirt_effects['salary_boost']*100)}%")
+    if salary_bonus > 0:
+        details.append(f"Бизнес: +{int(salary_bonus*100)}%")
     if details:
         response += f"• Доплаты: {', '.join(details)}\n"
     response += f"• Итоговый коэффициент: x{total_multiplier:.2f}\n\n"
@@ -876,14 +1208,14 @@ async def handle_buy_item(callback: CallbackQuery):
     if user['balance'] < item['price']:
         await callback.answer(f"❌ Недостаточно средств! Нужно {format_money(item['price'])}", show_alert=True)
         return
-    
+
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (item['price'], user_id))
         await db.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user_id, item['name'], item['price']))
         await db.execute("INSERT INTO transactions (user_id, type, amount, description) VALUES (?, 'purchase', -?, ?)",
                          (user_id, item['price'], f"Покупка: {item['name']}"))
         await db.commit()
-    
+
     bonus_text = ""
     if item.get("type") == "boost":
         await add_boost(user_id, item["id"], item["value"], item["hours"])
@@ -937,7 +1269,7 @@ async def handle_buy_item(callback: CallbackQuery):
                              (salary, datetime.now().isoformat(), user_id))
             await db.commit()
         bonus_text = f"⏱️ Мгновенная зарплата: {format_money(salary)}"
-    
+
     user = await get_user(user_id)
     response = (
         f"✅ *Покупка завершена*\n\n"
@@ -974,7 +1306,7 @@ async def handle_minigames(message: Message):
         "⚔️ *Дуэль*\n"
         f"• Ставка: от {format_money(ECONOMY_SETTINGS['duel_min_bet'])} до {format_money(ECONOMY_SETTINGS['duel_max_bet'])}\n"
         f"• Правила: вызов → ставка → бросок кубика по очереди\n"
-        f"• Бонус от Нагирта: +1 за каждые 20% бонуса\n"
+        f"• Бонус от Нагирта и БИЗНЕСОВ: +1 за каждые 20% бонуса\n"
         f"• Таймаут: {DUEL_TIMEOUT} сек на ход\n\n"
         f"💰 Ваш баланс: {format_money(user['balance'])}"
     )
@@ -1069,7 +1401,7 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
         await message.answer("❌ Произошла ошибка, попробуйте еще раз")
     await state.clear()
 
-# ----- АСФАЛЬТ -----
+# ----- АСФАЛЬТ (ИНТЕГРИРОВАН БИЗНЕС-БОНУС) -----
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -1081,13 +1413,11 @@ async def handle_game_asphalt(callback: CallbackQuery):
     can_work = True
     last_asphalt = user.get('last_asphalt')
     if last_asphalt:
-        try:
-            last_time = datetime.fromisoformat(last_asphalt)
+        last_time = safe_parse_datetime(last_asphalt)
+        if last_time:
             time_passed = (datetime.now() - last_time).total_seconds()
             if time_passed < 30:
                 can_work = False
-        except:
-            pass
     asphalt_text = (
         f"🛣️ *Укладка асфальта*\n\n"
         f"💰 Баланс: {format_money(user['balance'])}\n"
@@ -1117,39 +1447,39 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
     nagirt_effects = await get_active_nagirt_effects(user_id)
+    biz_bonuses = await get_total_business_bonuses(user_id)
+    asphalt_bonus = biz_bonuses["asphalt"]
+
     current_time = datetime.now()
     last_asphalt = user.get('last_asphalt')
     if last_asphalt:
-        try:
-            last_time = datetime.fromisoformat(last_asphalt)
+        last_time = safe_parse_datetime(last_asphalt)
+        if last_time:
             time_passed = (current_time - last_time).total_seconds()
             if time_passed < 30:
                 wait_time = 30 - int(time_passed)
                 await callback.answer(f"⏳ Отдыхай еще {wait_time} секунд!", show_alert=True)
                 return
-        except:
-            pass
+
     base_success_chance = 0.7
     success_chance = base_success_chance
     if nagirt_effects["has_active"]:
         success_chance = min(0.95, base_success_chance + (nagirt_effects["game_boost"] * 0.15))
         if nagirt_effects["side_effects"]:
             success_chance = max(0.3, success_chance - (len(nagirt_effects["side_effects"]) * 0.05))
+
     success = random.random() <= success_chance
     if success:
         base_earnings = ECONOMY_SETTINGS["asphalt_earnings"]
-        if nagirt_effects["has_active"]:
-            earnings_multiplier = 1.0 + nagirt_effects["game_boost"]
-            earnings = int(base_earnings * earnings_multiplier)
-            if not nagirt_effects["side_effects"] and nagirt_effects["game_boost"] > 0:
-                earnings = int(earnings * 1.1)
-        else:
-            earnings = base_earnings
+        earnings_multiplier = 1.0 + nagirt_effects.get("game_boost", 0) + asphalt_bonus
+        earnings = int(base_earnings * earnings_multiplier)
+
         jackpot_message = ""
         if random.random() <= 0.01:
             jackpot_bonus = earnings * 5
             earnings += jackpot_bonus
             jackpot_message = f"\n🎰 ДЖЕКПОТ! +{format_money(jackpot_bonus)}"
+
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute('''
                 UPDATE players 
@@ -1164,6 +1494,7 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 VALUES (?, ?, ?, ?)
             ''', (user_id, 'asphalt', earnings, 'Укладка асфальта' + (' + Нагирт' if nagirt_effects["has_active"] else '')))
             await db.commit()
+
         user = await get_user(user_id)
         result_text = (
             f"✅ *Асфальт уложен!*\n\n"
@@ -1171,6 +1502,8 @@ async def handle_lay_asphalt(callback: CallbackQuery):
         )
         if nagirt_effects["has_active"]:
             result_text += f"💊 *Эффект Нагирта:* +{int(nagirt_effects['game_boost']*100)}%\n"
+        if asphalt_bonus > 0:
+            result_text += f"🏢 *Бонус бизнеса:* +{int(asphalt_bonus*100)}%\n"
         result_text += (
             f"💰 Заработано: {format_money(earnings)}\n"
             f"📏 Всего метров: {user.get('asphalt_meters', 0):,}\n"
@@ -1243,20 +1576,20 @@ async def handle_asphalt_wait(callback: CallbackQuery):
         return
     last_asphalt = user.get('last_asphalt')
     if last_asphalt:
-        try:
-            last_time = datetime.fromisoformat(last_asphalt)
+        last_time = safe_parse_datetime(last_asphalt)
+        if last_time:
             time_passed = (datetime.now() - last_time).total_seconds()
             if time_passed < 30:
                 wait_time = 30 - int(time_passed)
                 await callback.answer(f"⏳ Жди еще {wait_time} секунд!", show_alert=True)
             else:
                 await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
-        except:
+        else:
             await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
     else:
         await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
 
-# ==================== ДУЭЛЬ (ПОШАГОВАЯ, ИСПРАВЛЕНА) ====================
+# ==================== ДУЭЛЬ (ПОШАГОВАЯ, С БИЗНЕС-БОНУСОМ) ====================
 async def duel_cancel_by_timeout(duel_id: str, challenger_id: int, acceptor_id: int, bet: int):
     await asyncio.sleep(DUEL_TIMEOUT)
     if duel_id not in active_duels:
@@ -1421,7 +1754,6 @@ async def duel_accept(callback: CallbackQuery):
         await callback.message.edit_text("❌ У вас недостаточно средств для участия в дуэли.")
         return
 
-    # Списываем ставки
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (bet, challenger_id))
         await db.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (bet, acceptor_id))
@@ -1491,8 +1823,10 @@ async def duel_roll(callback: CallbackQuery):
         return
 
     effects = await get_active_nagirt_effects(user_id)
+    biz_bonuses = await get_total_business_bonuses(user_id)
+    duel_bonus = biz_bonuses["duel"]
     game_boost = effects.get("game_boost", 0)
-    roll_bonus = int(game_boost * 5)  # 0.2 -> +1, 0.4 -> +2, 0.7 -> +3, 1.0 -> +5
+    roll_bonus = int((game_boost + duel_bonus) * 5)
     roll = random.randint(1, ECONOMY_SETTINGS['duel_dice_sides']) + roll_bonus
     roll = max(1, roll)
 
@@ -1501,7 +1835,7 @@ async def duel_roll(callback: CallbackQuery):
 
     await callback.message.edit_text(
         f"🎲 *ВЫ БРОСИЛИ КУБИК!*\n\n"
-        f"Результат: {roll} (базовый + бонус Нагирта: +{roll_bonus})\n\n"
+        f"Результат: {roll} (базовый + бонус: +{roll_bonus})\n\n"
         f"⏳ Ожидайте броска противника...",
         parse_mode="Markdown"
     )
@@ -1542,7 +1876,6 @@ async def duel_roll(callback: CallbackQuery):
             winner_roll = acceptor_roll
             loser_roll = challenger_roll
         else:
-            # Ничья – возвращаем ставки
             async with aiosqlite.connect(DB_NAME) as db:
                 await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, duel["challenger_id"]))
                 await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, duel["acceptor_id"]))
@@ -1566,7 +1899,6 @@ async def duel_roll(callback: CallbackQuery):
             return
 
         prize = bet * 2
-        # ✅ Только ОДИН вызов – через update_balance
         await update_balance(winner_id, prize, "duel_win", f"Победа в дуэли против {loser_name}, ставка {bet}")
         await update_balance(loser_id, -bet, "duel_lose", f"Поражение в дуэли против {winner_name}, ставка {bet}")
 
@@ -1598,6 +1930,216 @@ async def duel_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Дуэль отменена.")
     await state.clear()
     await callback.answer()
+
+# ==================== БИЗНЕС-СИСТЕМА (ПОЛНЫЙ ИНТЕРФЕЙС) ====================
+@dp.message(F.text == "🏢 Бизнес")
+async def cmd_business_menu(message: Message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    if not user:
+        await message.answer("❌ Сначала зарегистрируйся через /start")
+        return
+
+    biz_list = await get_user_businesses(user_id)
+    total_income = 0
+    for biz in biz_list:
+        total_income += await calculate_business_income(biz)
+
+    text = (
+        f"🏢 *КОРПОРАЦИЯ ВИТАЛИКА*\n\n"
+        f"💰 Баланс: {format_money(user['balance'])}\n"
+        f"🏭 Твоих бизнесов: {len(biz_list)}\n"
+        f"💵 Пассивный доход: {format_money(total_income)}/час\n\n"
+    )
+
+    if biz_list:
+        text += "Управляй империей 👇"
+    else:
+        text += "Пока пусто. Купи первый бизнес! 👇"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Купить бизнес", callback_data="biz_shop")],
+        [InlineKeyboardButton(text="📋 Мои предприятия", callback_data="biz_my")],
+        [InlineKeyboardButton(text="💰 Собрать доход", callback_data="biz_collect")]
+    ])
+
+    await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+
+@dp.callback_query(F.data == "biz_shop")
+async def biz_shop(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = await get_user(user_id)
+
+    text = "🏪 *МАГАЗИН БИЗНЕСОВ*\n\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+
+    for key, biz in BUSINESS_TYPES.items():
+        text += f"**{biz['name']}** — {format_money(biz['price'])}\n"
+        text += f"_{biz['description']}_\n"
+        text += f"💰 Доход: {format_money(biz['base_income'])}/ч\n"
+        if biz.get('salary_bonus'):
+            text += f"📈 +{int(biz['salary_bonus']*100)}% к зарплате\n"
+        if biz.get('duel_bonus'):
+            text += f"⚔️ +{int(biz['duel_bonus']*100)}% к дуэлям\n"
+        if biz.get('asphalt_bonus'):
+            text += f"🛣️ +{int(biz['asphalt_bonus']*100)}% к асфальту\n"
+        text += "\n"
+
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text=f"✅ Купить {biz['name']}", callback_data=f"biz_buy_{key}")
+        ])
+
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="biz_back_to_menu")
+    ])
+
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("biz_buy_"))
+async def biz_buy(callback: CallbackQuery):
+    biz_key = callback.data[8:]
+    success, msg = await buy_business(callback.from_user.id, biz_key)
+    await callback.answer(msg, show_alert=True)
+    if success:
+        await cmd_business_menu(callback.message)
+
+@dp.callback_query(F.data == "biz_my")
+async def biz_my(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    biz_list = await get_user_businesses(user_id)
+
+    if not biz_list:
+        await callback.message.edit_text(
+            "❌ У тебя ещё нет бизнеса.\nКупи первый через меню!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛒 Магазин бизнесов", callback_data="biz_shop")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="biz_back_to_menu")]
+            ])
+        )
+        await callback.answer()
+        return
+
+    text = "📋 *МОИ ПРЕДПРИЯТИЯ*\n\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+
+    total_income = 0
+    for biz in biz_list:
+        config = BUSINESS_TYPES[biz['biz_type']]
+        income = await calculate_business_income(biz)
+        total_income += income
+
+        text += f"**{config['name']}** (ур. {biz['upgrade_level']})\n"
+        text += f"💰 Доход: {format_money(income)}/ч\n"
+        text += f"❤️ Прочность: {biz['health']}%\n\n"
+
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text=f"🔧 {config['name']}", callback_data=f"biz_info_{biz['id']}")
+        ])
+
+    text += f"💵 **Общий доход:** {format_money(total_income)}/ч"
+
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="💰 Собрать доход", callback_data="biz_collect"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="biz_back_to_menu")
+    ])
+
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("biz_info_"))
+async def biz_info(callback: CallbackQuery):
+    biz_id = int(callback.data[9:])
+    user_id = callback.from_user.id
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM businesses WHERE id = ? AND owner_id = ?",
+            (biz_id, user_id)
+        )
+        biz = await cursor.fetchone()
+
+    if not biz:
+        await callback.answer("❌ Бизнес не найден или не принадлежит тебе", show_alert=True)
+        return
+
+    biz = dict(biz)
+    config = BUSINESS_TYPES[biz['biz_type']]
+    income = await calculate_business_income(biz)
+    upgrades_installed = await get_business_upgrades(biz_id)
+    installed_levels = [u['upgrade_level'] for u in upgrades_installed]
+
+    text = (
+        f"🏭 **{config['name']}**\n"
+        f"📊 Уровень прокачки: {biz['upgrade_level']}/{config.get('max_level', 3)}\n"
+        f"💰 Текущий доход: {format_money(income)}/ч\n"
+        f"❤️ Состояние: {biz['health']}%\n\n"
+        f"**📈 Улучшения:**\n"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+
+    for lvl, up in config.get('upgrades', {}).items():
+        status = "✅" if lvl in installed_levels else "❌"
+        if lvl in installed_levels:
+            text += f"• {status} {up['name']} (установлено)\n"
+        elif lvl == biz['upgrade_level'] + 1:
+            text += f"• {up['name']} — {format_money(up['cost'])}\n  _{up['desc']}_\n"
+            kb.inline_keyboard.append([
+                InlineKeyboardButton(text=f"⬆️ Купить {up['name']}",
+                                   callback_data=f"biz_upgrade_{biz_id}_{lvl}")
+            ])
+        else:
+            text += f"• 🔒 Уровень {lvl} (требуется прокачка)\n"
+
+    if not config.get('upgrades'):
+        text += "Нет доступных улучшений.\n"
+
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 К списку", callback_data="biz_my")
+    ])
+
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("biz_upgrade_"))
+async def biz_upgrade(callback: CallbackQuery):
+    parts = callback.data.split('_')
+    biz_id = int(parts[2])
+    lvl = int(parts[3])
+    user_id = callback.from_user.id
+
+    success, msg = await upgrade_business(user_id, biz_id, lvl)
+    await callback.answer(msg, show_alert=True)
+
+    if success:
+        await biz_info(callback)
+
+@dp.callback_query(F.data == "biz_collect")
+async def biz_collect(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    amount = await collect_business_income(user_id)
+
+    if amount > 0:
+        await callback.answer(f"💰 Собрано {format_money(amount)}!", show_alert=False)
+        await cmd_business_menu(callback.message)
+    else:
+        await callback.answer("❌ Нет дохода для сбора (кулдаун 1 час)", show_alert=True)
+
+@dp.callback_query(F.data == "biz_back_to_menu")
+async def biz_back_to_menu(callback: CallbackQuery):
+    await cmd_business_menu(callback.message)
+    await callback.answer()
+
+@dp.message(Command("collect"))
+async def cmd_collect(message: Message):
+    user_id = message.from_user.id
+    amount = await collect_business_income(user_id)
+    if amount > 0:
+        await message.answer(f"💰 Собрано {format_money(amount)} с бизнесов!")
+    else:
+        await message.answer("❌ Нет дохода для сбора (кулдаун 1 час)")
 
 # ==================== ПЕРЕВОДЫ ====================
 @dp.message(F.text == "🔁 Перевод")
@@ -1970,7 +2512,7 @@ async def handle_admin_close(callback: CallbackQuery):
         pass
     await callback.answer()
 
-# ==================== АДМИН-ЧЕКИ (ИСПРАВЛЕНЫ) ====================
+# ==================== АДМИН-ЧЕКИ ====================
 @dp.callback_query(F.data == "admin_checks")
 async def handle_admin_checks(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -1984,7 +2526,7 @@ async def handle_admin_checks(callback: CallbackQuery):
         "Игроки активируют чеки простым переходом по ссылке!\n"
         "Один человек = одна активация ⚠️"
     )
-    await callback.message.edit_text(checks_text, parse_mode="Markdown", 
+    await callback.message.edit_text(checks_text, parse_mode="Markdown",
                                    reply_markup=get_admin_checks_keyboard())
     await callback.answer()
 
@@ -2127,7 +2669,7 @@ async def handle_check_message(message: Message, state: FSMContext):
     item_id = data.get('item_id')
     max_uses = data.get('max_uses', 1)
     hours = data.get('hours', 24)
-    custom_message = message.text if message.text != '-' else ""
+    custom_message = message.text if message.text != "-" else ""
 
     bot_info = await bot.get_me()
     bot_username = bot_info.username
@@ -2184,7 +2726,7 @@ async def handle_check_message(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📋 Отправить ссылку в чат", callback_data=f"send_link_{check_id}")],
         [InlineKeyboardButton(text="🧾 К списку чеков", callback_data="admin_checks_list")]
     ]
-    await message.answer(check_text, parse_mode="Markdown", 
+    await message.answer(check_text, parse_mode="Markdown",
                         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.clear()
 
@@ -2418,6 +2960,22 @@ async def handle_statistics(message: Message):
         f"• Уложено асфальта: {user.get('asphalt_meters', 0):,} метров\n"
         f"• Заработано на асфальте: {format_money(user.get('asphalt_earned', 0))}\n\n"
     )
+    # Бизнес-статистика
+    biz_list = await get_user_businesses(user_id)
+    if biz_list:
+        total_income = 0
+        biz_names = []
+        for biz in biz_list:
+            config = BUSINESS_TYPES[biz['biz_type']]
+            biz_names.append(config['name'])
+            total_income += await calculate_business_income(biz)
+        stats_text += f"🏢 *Бизнес-империя:*\n"
+        stats_text += f"• Предприятий: {len(biz_list)}\n"
+        stats_text += f"• Доход/час: {format_money(total_income)}\n"
+        stats_text += f"• Активы: {', '.join(biz_names[:3])}"
+        if len(biz_list) > 3:
+            stats_text += f" и ещё {len(biz_list)-3}"
+        stats_text += "\n\n"
     if total_stats:
         stats_text += (
             f"🏢 *Общая статистика:*\n"
@@ -2438,11 +2996,21 @@ async def handle_effects(message: Message):
     effects = await get_active_nagirt_effects(user_id)
     tolerance = await get_nagirt_tolerance(user_id)
     boosts = await get_active_boosts(user_id)
+    biz_bonuses = await get_total_business_bonuses(user_id)
     effects_text = "⚡ *АКТИВНЫЕ ЭФФЕКТЫ*\n\n"
     if boosts > 0:
         effects_text += f"📈 *Бусты к зарплате:* +{int(boosts*100)}%\n\n"
     else:
         effects_text += "📈 *Бусты к зарплате:* нет\n\n"
+    if biz_bonuses['salary'] > 0 or biz_bonuses['duel'] > 0 or biz_bonuses['asphalt'] > 0:
+        effects_text += "🏢 *Бонусы от бизнесов:*\n"
+        if biz_bonuses['salary'] > 0:
+            effects_text += f"• Зарплата: +{int(biz_bonuses['salary']*100)}%\n"
+        if biz_bonuses['duel'] > 0:
+            effects_text += f"• Дуэли: +{int(biz_bonuses['duel']*100)}%\n"
+        if biz_bonuses['asphalt'] > 0:
+            effects_text += f"• Асфальт: +{int(biz_bonuses['asphalt']*100)}%\n"
+        effects_text += "\n"
     if effects["has_active"]:
         effects_text += "💊 *Таблетки Нагирт:*\n"
         if effects["salary_boost"] > 0:
@@ -2573,6 +3141,53 @@ async def cmd_stats(message: Message):
         )
     await message.answer(stats_text, parse_mode="Markdown")
 
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer("📢 *Режим рассылки*\n\nОтправьте сообщение для рассылки всем пользователям.\n❌ Для отмены отправьте /cancel", parse_mode="Markdown")
+    await state.set_state(BroadcastStates.waiting_for_message)
+
+@dp.message(Command("bonus"))
+async def cmd_bonus(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("❌ Использование: /bonus [user_id] [сумма]")
+        return
+    try:
+        user_id = int(args[1])
+        amount = int(args[2])
+        user = await get_user(user_id)
+        if not user:
+            await message.answer("❌ Пользователь не найден")
+            return
+        await update_balance(user_id, amount, "bonus", "Бонус от администратора (команда)")
+        await message.answer(f"✅ Бонус {format_money(amount)} выдан пользователю {user['full_name']}")
+    except ValueError:
+        await message.answer("❌ Неверный формат ID или суммы")
+
+@dp.message(Command("fine"))
+async def cmd_fine(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("❌ Использование: /fine [user_id] [сумма]")
+        return
+    try:
+        user_id = int(args[1])
+        amount = int(args[2])
+        user = await get_user(user_id)
+        if not user:
+            await message.answer("❌ Пользователь не найден")
+            return
+        await update_balance(user_id, -amount, "penalty", "Штраф от администратора (команда)")
+        await message.answer(f"✅ Штраф {format_money(amount)} выписан пользователю {user['full_name']}")
+    except ValueError:
+        await message.answer("❌ Неверный формат ID или суммы")
+
 # ==================== ЗАПУСК БОТА ====================
 async def on_startup():
     await init_db()
@@ -2583,7 +3198,7 @@ async def on_startup():
     else:
         logger.info(f"✅ Username бота: @{bot_info.username}")
     asyncio.create_task(penalty_scheduler())
-    logger.info("✅ Бот запущен! Дуэль пошаговая (без дублей), Нагирт ужесточён, чеки исправлены.")
+    logger.info("✅ Бот запущен! БИЗНЕС-СИСТЕМА АКТИВИРОВАНА.")
 
 async def on_shutdown():
     logger.info("🛑 Бот останавливается...")
