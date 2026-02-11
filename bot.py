@@ -1,13 +1,12 @@
 """
-Telegram бот "Виталик Штрафующий" - ПОЛНАЯ ВЕРСИЯ 
-✅ ЧЕКИ ИСПРАВЛЕНЫ | ✅ ДУЭЛЬ ДОБАВЛЕНА | ✅ НАГИРТ УЖЕСТОЧЁН
+Telegram бот "Виталик Штрафующий"
+✅ Чеки исправлены | ✅ Дуэль с броском кубика | ✅ Нагирт ужесточён
 """
 
 import asyncio
 import logging
 import random
 import string
-import json
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 
@@ -24,7 +23,7 @@ import aiosqlite
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
-ADMIN_ID = 5775839902  # Твой ID
+ADMIN_ID = 5775839902
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,19 +38,18 @@ ECONOMY_SETTINGS = {
     "salary_min": 800,
     "salary_max": 2500,
     "salary_interval": 300,
-    "fine_chance": 0.45,                # БЫЛО 0.25 – ЖЁСТЧЕ
-    "random_fine_min": 300,             # БЫЛО 200
-    "random_fine_max": 1500,            # БЫЛО 1000
+    "fine_chance": 0.45,                # повышен
+    "random_fine_min": 300,
+    "random_fine_max": 1500,
     "asphalt_earnings": 50,
-    "asphalt_fine_min": 150,           # БЫЛО 100
-    "asphalt_fine_max": 600,           # БЫЛО 400
+    "asphalt_fine_min": 150,
+    "asphalt_fine_max": 600,
     "roulette_min_bet": 100,
     "roulette_max_bet": 5000,
     "roulette_win_chance": 0.42,
     "min_transfer": 100,
     "random_fine_interval_min": 1200,
     "random_fine_interval_max": 1800,
-    # 🔸 НАСТРОЙКИ ДУЭЛИ
     "duel_min_bet": 200,
     "duel_max_bet": 10000,
     "duel_dice_sides": 6,
@@ -59,18 +57,18 @@ ECONOMY_SETTINGS = {
 
 # ==================== ТОВАРЫ МАГАЗИНА ====================
 SHOP_ITEMS = [
-    {"id": "bonus_coin", "name": "🪙 Бонусная монета", "price": 1500, 
+    {"id": "bonus_coin", "name": "🪙 Бонусная монета", "price": 1500,
      "description": "+15% к получке на 8 часов", "type": "boost", "value": 0.15, "hours": 8},
-    {"id": "premium_boost", "name": "🚀 Премиум-Буст", "price": 5000, 
+    {"id": "premium_boost", "name": "🚀 Премиум-Буст", "price": 5000,
      "description": "+30% к получке на 24 часа", "type": "boost", "value": 0.3, "hours": 24},
-    {"id": "mega_boost", "name": "💎 Мега-Буст", "price": 15000, 
+    {"id": "mega_boost", "name": "💎 Мега-Буст", "price": 15000,
      "description": "+50% к получке на 3 дня", "type": "boost", "value": 0.5, "hours": 72},
-    {"id": "day_off", "name": "🎉 Выходной", "price": 3000, 
+    {"id": "day_off", "name": "🎉 Выходной", "price": 3000,
      "description": "Полный иммунитет к штрафам на 12 часов", "type": "protection", "hours": 12},
-    {"id": "insurance", "name": "🛡️ Страховка", "price": 4000, 
+    {"id": "insurance", "name": "🛡️ Страховка", "price": 4000,
      "description": "Страховка от одного штрафа (возмещает 80%)", "type": "insurance"},
 
-    # 💊 НАГИРТ – УЖЕСТОЧЁН (эффекты СНИЖЕНЫ, риски ПОВЫШЕНЫ)
+    # 💊 НАГИРТ – ужесточён
     {"id": "nagirt_light", "name": "💊 Нагирт Лайт", "price": 2000,
      "description": "+15% к зарплате, +20% к играм на 2 часа. Риск штрафа +10%",
      "type": "pill", "effect_salary": 0.15, "effect_game": 0.2, "hours": 2,
@@ -194,7 +192,6 @@ async def init_db():
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def safe_parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
-    """Безопасное преобразование строки в datetime."""
     if not dt_str:
         return None
     try:
@@ -277,15 +274,14 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
     
     effects = {
         "salary_boost": 0.0,
-        "game_boost": 0.0,          # бонус к мини-играм
+        "game_boost": 0.0,
         "side_effects": [],
         "has_active": len(rows) > 0,
-        "fine_chance_mod": 0.0      # дополнительный шанс штрафа
+        "fine_chance_mod": 0.0
     }
     
     for row in rows:
         pill_type, strength, side_effects = row
-        # Привязываем значения к конкретным типам (более жёсткие, чем раньше)
         if pill_type == "nagirt_light":
             effects["salary_boost"] += 0.15
             effects["game_boost"] += 0.2
@@ -298,7 +294,6 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
             effects["salary_boost"] += 0.5
             effects["game_boost"] += 0.7
             effects["fine_chance_mod"] += 0.4
-        # (любые другие таблетки игнорируются, если появятся)
         if side_effects:
             effects["side_effects"].append(side_effects)
     
@@ -310,7 +305,7 @@ async def get_nagirt_tolerance(user_id: int) -> float:
         result = await cursor.fetchone()
         return result[0] if result else 1.0
 
-async def update_nagirt_tolerance(user_id: int, increase: float = 0.15):   # увеличен шаг толерантности
+async def update_nagirt_tolerance(user_id: int, increase: float = 0.15):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('''
             INSERT OR REPLACE INTO nagirt_tolerance (user_id, tolerance, last_used)
@@ -407,7 +402,7 @@ def get_minigames_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="🎰 Рулетка", callback_data="game_roulette")],
         [InlineKeyboardButton(text="🛣️ Укладка асфальта", callback_data="game_asphalt")],
-        [InlineKeyboardButton(text="⚔️ Дуэль", callback_data="game_duel")],   # НОВОЕ
+        [InlineKeyboardButton(text="⚔️ Дуэль", callback_data="game_duel")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -498,18 +493,21 @@ class CheckStates(StatesGroup):
     waiting_for_check_hours = State()
     waiting_for_check_message = State()
 
-# ==================== НОВЫЕ СОСТОЯНИЯ ДЛЯ ДУЭЛИ ====================
 class DuelStates(StatesGroup):
     choosing_opponent = State()
     waiting_bet_amount = State()
     waiting_confirmation = State()
 
-# ==================== СИСТЕМА ЧЕКОВ (ИСПРАВЛЕННАЯ) ====================
+# ==================== АКТИВНЫЕ ДУЭЛИ ====================
+active_duels = {}
+DUEL_TIMEOUT = 60  # секунд на ход
+
+# ==================== СИСТЕМА ЧЕКОВ ====================
 def generate_check_id() -> str:
     chars = string.ascii_uppercase + string.digits
     return 'CHK_' + ''.join(random.choices(chars, k=12))
 
-async def create_gift_check(creator_id: int, check_type: str, amount: int = 0, 
+async def create_gift_check(creator_id: int, check_type: str, amount: int = 0,
                            item_id: str = None, max_uses: int = 1, hours: int = 24,
                            message: str = "") -> str:
     check_id = generate_check_id()
@@ -788,7 +786,6 @@ async def handle_paycheck(message: Message):
     nagirt_effects = await get_active_nagirt_effects(user_id)
     base_salary = random.randint(ECONOMY_SETTINGS["salary_min"], ECONOMY_SETTINGS["salary_max"])
     
-    # 🚨 ЖЁСТЧЕ: штраф с увеличенным шансом и суммой
     pill_fine = 0
     if nagirt_effects["has_active"]:
         actual_fine_chance = ECONOMY_SETTINGS["fine_chance"] + nagirt_effects.get("fine_chance_mod", 0)
@@ -825,12 +822,11 @@ async def handle_paycheck(message: Message):
         response += f"⚠️ *ШТРАФ ЗА НАГИРТ:* -{format_money(pill_fine)}\n\n"
     response += f"✅ *Итого начислено:* {format_money(final_salary)}\n"
     response += f"💳 *Новый баланс:* {format_money(user['balance'])}\n\n"
-    if final_salary < ECONOMY_SETTINGS["salary_min"] * 1.5:
-        comments = ["Могло бы быть и больше...", "На такую сумму даже пиццу не купишь!", "Работай лучше!"]
-    elif final_salary > ECONOMY_SETTINGS["salary_max"] * 0.8:
-        comments = ["Отличная работа!", "Так держать!", "Вы заслужили эту премию!"]
-    else:
-        comments = ["Нормально работаешь.", "Продолжай в том же духе.", "Стабильно, но можно лучше."]
+    comments = [
+        "Могло бы быть и больше...", "На такую сумму даже пиццу не купишь!", "Работай лучше!",
+        "Отличная работа!", "Так держать!", "Вы заслужили эту премию!",
+        "Нормально работаешь.", "Продолжай в том же духе.", "Стабильно, но можно лучше."
+    ]
     if nagirt_effects["has_active"]:
         pill_comments = ["Таблетки не заменят профессионализм!", "Осторожнее с Нагиртом!", "Лекарства должны помогать, а не мешать работе!", "Вы думаете, Нагирт делает из вас супермена?"]
         response += f"💬 *Виталик:* '{random.choice(pill_comments)}'"
@@ -907,16 +903,13 @@ async def handle_buy_item(callback: CallbackQuery):
             bonus_text = "✅ Страховка активирована! Следующий штраф будет возмещен на 80%"
     elif item.get("type") == "pill":
         tolerance = await get_nagirt_tolerance(user_id)
-        # Эффективность снижается от толерантности
         real_salary_boost = item["effect_salary"] / tolerance
         real_game_boost = item["effect_game"] / tolerance
-        # Побочки
         side_effects = ""
         if random.randint(1, 100) <= item.get("side_effect_chance", 0):
             side_effects = random.choice(["Головокружение", "Тошнота", "Слабость", "Дрожь в руках", "Нарушение координации", "Галлюцинации", "Паранойя"])
-        # Сохраняем эффект в базе (используем effect_strength как среднее, но на логику это не влияет)
         await add_nagirt_pill(user_id, item["id"], (real_salary_boost+real_game_boost)/2, item["hours"], side_effects)
-        await update_nagirt_tolerance(user_id, increase=0.15)  # толерантность растёт быстрее
+        await update_nagirt_tolerance(user_id, increase=0.15)
         bonus_text = f"💊 Таблетка принята! +{int(real_salary_boost*100)}% к зарплате, +{int(real_game_boost*100)}% к играм на {item['hours']}ч"
         if side_effects:
             bonus_text += f"\n⚠️ Побочный эффект: {side_effects}"
@@ -959,7 +952,7 @@ async def handle_buy_item(callback: CallbackQuery):
         await callback.message.answer(response, parse_mode="Markdown")
     await callback.answer()
 
-# ==================== МИНИ-ИГРЫ (РУЛЕТКА, АСФАЛЬТ) ====================
+# ==================== МИНИ-ИГРЫ ====================
 @dp.message(F.text == "🎮 Мини-игры")
 async def handle_minigames(message: Message):
     user_id = message.from_user.id
@@ -980,13 +973,14 @@ async def handle_minigames(message: Message):
         f"• Время работы: 30 секунд\n\n"
         "⚔️ *Дуэль*\n"
         f"• Ставка: от {format_money(ECONOMY_SETTINGS['duel_min_bet'])} до {format_money(ECONOMY_SETTINGS['duel_max_bet'])}\n"
-        f"• Правила: вызов → ставка → бросок кубика 1-6\n"
-        f"• Бонус от Нагирта: до +3 к броску\n\n"
+        f"• Правила: вызов → ставка → бросок кубика по очереди\n"
+        f"• Бонус от Нагирта: +1 за каждые 20% бонуса\n"
+        f"• Таймаут: {DUEL_TIMEOUT} сек на ход\n\n"
         f"💰 Ваш баланс: {format_money(user['balance'])}"
     )
     await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
 
-# ----- РУЛЕТКА (без изменений, но с новым импортом) -----
+# ----- РУЛЕТКА -----
 @dp.callback_query(F.data == "game_roulette")
 async def handle_game_roulette_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -1075,7 +1069,7 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
         await message.answer("❌ Произошла ошибка, попробуйте еще раз")
     await state.clear()
 
-# ----- АСФАЛЬТ (без изменений) -----
+# ----- АСФАЛЬТ -----
 @dp.callback_query(F.data == "game_asphalt")
 async def handle_game_asphalt(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -1262,7 +1256,26 @@ async def handle_asphalt_wait(callback: CallbackQuery):
     else:
         await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
 
-# ==================== ДУЭЛЬ (НОВОЕ) ====================
+# ==================== ДУЭЛЬ (ПОШАГОВАЯ) ====================
+async def duel_cancel_by_timeout(duel_id: str, challenger_id: int, acceptor_id: int, bet: int):
+    """Отмена дуэли, если игрок не бросил кубик за отведённое время."""
+    await asyncio.sleep(DUEL_TIMEOUT)
+    if duel_id not in active_duels:
+        return
+    duel = active_duels[duel_id]
+    if duel["status"] != "finished":
+        # Возвращаем ставки
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, challenger_id))
+            await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, acceptor_id))
+            await db.commit()
+        try:
+            await bot.send_message(challenger_id, "⏰ Дуэль отменена из-за бездействия. Ставки возвращены.")
+            await bot.send_message(acceptor_id, "⏰ Дуэль отменена из-за бездействия. Ставки возвращены.")
+        except:
+            pass
+        del active_duels[duel_id]
+
 @dp.callback_query(F.data == "game_duel")
 async def handle_duel_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -1392,77 +1405,194 @@ async def duel_accept(callback: CallbackQuery):
     parts = callback.data.split('_')
     challenger_id = int(parts[2])
     bet = int(parts[3])
+
     if acceptor_id == challenger_id:
         await callback.answer("❌ Нельзя принять свой вызов", show_alert=True)
         return
+
     challenger = await get_user(challenger_id)
     acceptor = await get_user(acceptor_id)
     if not challenger or not acceptor:
         await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
+
     if challenger['balance'] < bet:
         await callback.message.edit_text("❌ У противника недостаточно средств. Дуэль отменена.")
         return
     if acceptor['balance'] < bet:
         await callback.message.edit_text("❌ У вас недостаточно средств для участия в дуэли.")
         return
-    
+
     # Списываем ставки
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (bet, challenger_id))
         await db.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (bet, acceptor_id))
         await db.commit()
-    
-    challenger_effects = await get_active_nagirt_effects(challenger_id)
-    acceptor_effects = await get_active_nagirt_effects(acceptor_id)
-    
-    challenger_roll = random.randint(1, ECONOMY_SETTINGS['duel_dice_sides'])
-    acceptor_roll = random.randint(1, ECONOMY_SETTINGS['duel_dice_sides'])
-    
-    # Бонус от Нагирта (game_boost) – каждый пункт даёт +0.5 к кубику, округление вверх
-    challenger_roll += int(challenger_effects.get("game_boost", 0) * ECONOMY_SETTINGS['duel_dice_sides'] * 0.5 + 0.5)
-    acceptor_roll += int(acceptor_effects.get("game_boost", 0) * ECONOMY_SETTINGS['duel_dice_sides'] * 0.5 + 0.5)
-    
-    if challenger_roll > acceptor_roll:
-        winner_id = challenger_id
-        loser_id = acceptor_id
-        winner_name = challenger['full_name']
-        loser_name = acceptor['full_name']
-    elif acceptor_roll > challenger_roll:
-        winner_id = acceptor_id
-        loser_id = challenger_id
-        winner_name = acceptor['full_name']
-        loser_name = challenger['full_name']
-    else:
-        # Ничья – возвращаем ставки
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, challenger_id))
-            await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, acceptor_id))
-            await db.commit()
-        await callback.message.edit_text(
-            f"🤝 *НИЧЬЯ!*\n\n"
-            f"🎲 {challenger['full_name']}: {challenger_roll}\n"
-            f"🎲 {acceptor['full_name']}: {acceptor_roll}\n\n"
-            f"Ставки возвращены."
-        )
-        return
-    
-    prize = bet * 2
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (prize, winner_id))
-        await db.commit()
-    
-    await update_balance(winner_id, prize, "duel_win", f"Победа в дуэли против {loser_name}, ставка {bet}")
-    await update_balance(loser_id, -bet, "duel_lose", f"Поражение в дуэли против {winner_name}, ставка {bet}")
-    
-    result_text = (
-        f"⚔️ *ДУЭЛЬ СОСТОЯЛАСЬ!*\n\n"
-        f"🎲 {challenger['full_name']}: {challenger_roll}\n"
-        f"🎲 {acceptor['full_name']}: {acceptor_roll}\n\n"
-        f"🏆 *Победитель:* {winner_name}\n"
-        f"💰 Выигрыш: {format_money(prize)}\n\n"
+
+    duel_id = f"{challenger_id}_{acceptor_id}_{int(datetime.now().timestamp())}"
+    active_duels[duel_id] = {
+        "challenger_id": challenger_id,
+        "acceptor_id": acceptor_id,
+        "challenger_name": challenger['full_name'],
+        "acceptor_name": acceptor['full_name'],
+        "bet": bet,
+        "challenger_roll": None,
+        "acceptor_roll": None,
+        "status": "waiting_challenger",
+        "last_action": datetime.now(),
+        "message_ids": []
+    }
+
+    # Сообщение вызывающему игроку (первый бросок)
+    challenger_msg = await bot.send_message(
+        challenger_id,
+        f"⚔️ *ДУЭЛЬ ПРИНЯТА!*\n\n"
+        f"Противник: {acceptor['full_name']}\n"
+        f"💰 Ставка: {format_money(bet)}\n\n"
+        f"🎲 Ваш ход! Нажмите кнопку, чтобы бросить кубик.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎲 Бросить кубик", callback_data=f"duel_roll_{duel_id}")]
+        ])
     )
-    await callback.message.edit_text(result_text, parse_mode="Markdown")
+
+    # Сообщение принявшему (ожидание)
+    acceptor_msg = await callback.message.edit_text(
+        f"⚔️ *ВЫ ПРИНЯЛИ ДУЭЛЬ!*\n\n"
+        f"Противник: {challenger['full_name']}\n"
+        f"💰 Ставка: {format_money(bet)}\n\n"
+        f"⏳ Ожидайте, пока противник бросит кубик...",
+        parse_mode="Markdown"
+    )
+
+    active_duels[duel_id]["message_ids"] = [challenger_msg.message_id, acceptor_msg.message_id]
+    asyncio.create_task(duel_cancel_by_timeout(duel_id, challenger_id, acceptor_id, bet))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("duel_roll_"))
+async def duel_roll(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    duel_id = callback.data[10:]
+
+    if duel_id not in active_duels:
+        await callback.answer("❌ Дуэль уже завершена или не существует", show_alert=True)
+        return
+
+    duel = active_duels[duel_id]
+
+    if duel["status"] == "waiting_challenger" and user_id == duel["challenger_id"]:
+        player = "challenger"
+        opponent_id = duel["acceptor_id"]
+        player_name = duel["challenger_name"]
+        opponent_name = duel["acceptor_name"]
+    elif duel["status"] == "waiting_acceptor" and user_id == duel["acceptor_id"]:
+        player = "acceptor"
+        opponent_id = duel["challenger_id"]
+        player_name = duel["acceptor_name"]
+        opponent_name = duel["challenger_name"]
+    else:
+        await callback.answer("❌ Сейчас не ваш ход или дуэль уже завершена", show_alert=True)
+        return
+
+    effects = await get_active_nagirt_effects(user_id)
+    game_boost = effects.get("game_boost", 0)
+    roll_bonus = int(game_boost * 5)  # 0.2 -> +1, 0.4 -> +2, 0.7 -> +3, 1.0 -> +5
+    roll = random.randint(1, ECONOMY_SETTINGS['duel_dice_sides']) + roll_bonus
+    roll = max(1, roll)
+
+    duel[f"{player}_roll"] = roll
+    duel["last_action"] = datetime.now()
+
+    await callback.message.edit_text(
+        f"🎲 *ВЫ БРОСИЛИ КУБИК!*\n\n"
+        f"Результат: {roll} (базовый + бонус Нагирта: +{roll_bonus})\n\n"
+        f"⏳ Ожидайте броска противника...",
+        parse_mode="Markdown"
+    )
+
+    if duel["status"] == "waiting_challenger":
+        duel["status"] = "waiting_acceptor"
+        opponent_msg = await bot.send_message(
+            opponent_id,
+            f"⚔️ *ВАШ ХОД!*\n\n"
+            f"Противник {player_name} уже бросил кубик.\n"
+            f"💰 Ставка: {format_money(duel['bet'])}\n\n"
+            f"🎲 Нажмите кнопку, чтобы бросить кубик!",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎲 Бросить кубик", callback_data=f"duel_roll_{duel_id}")]
+            ])
+        )
+        asyncio.create_task(duel_cancel_by_timeout(duel_id, duel["challenger_id"], duel["acceptor_id"], duel["bet"]))
+
+    elif duel["status"] == "waiting_acceptor":
+        duel["status"] = "finished"
+        challenger_roll = duel["challenger_roll"]
+        acceptor_roll = duel["acceptor_roll"]
+        bet = duel["bet"]
+
+        if challenger_roll > acceptor_roll:
+            winner_id = duel["challenger_id"]
+            loser_id = duel["acceptor_id"]
+            winner_name = duel["challenger_name"]
+            loser_name = duel["acceptor_name"]
+            winner_roll = challenger_roll
+            loser_roll = acceptor_roll
+        elif acceptor_roll > challenger_roll:
+            winner_id = duel["acceptor_id"]
+            loser_id = duel["challenger_id"]
+            winner_name = duel["acceptor_name"]
+            loser_name = duel["challenger_name"]
+            winner_roll = acceptor_roll
+            loser_roll = challenger_roll
+        else:
+            # Ничья
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, duel["challenger_id"]))
+                await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (bet, duel["acceptor_id"]))
+                await db.commit()
+            await bot.send_message(
+                duel["challenger_id"],
+                f"🤝 *НИЧЬЯ!*\n\n"
+                f"Ваш бросок: {challenger_roll}\n"
+                f"Бросок {duel['acceptor_name']}: {acceptor_roll}\n\n"
+                f"Ставки возвращены."
+            )
+            await bot.send_message(
+                duel["acceptor_id"],
+                f"🤝 *НИЧЬЯ!*\n\n"
+                f"Ваш бросок: {acceptor_roll}\n"
+                f"Бросок {duel['challenger_name']}: {challenger_roll}\n\n"
+                f"Ставки возвращены."
+            )
+            del active_duels[duel_id]
+            await callback.answer()
+            return
+
+        prize = bet * 2
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (prize, winner_id))
+            await db.commit()
+
+        await update_balance(winner_id, prize, "duel_win", f"Победа в дуэли против {loser_name}, ставка {bet}")
+        await update_balance(loser_id, -bet, "duel_lose", f"Поражение в дуэли против {winner_name}, ставка {bet}")
+
+        await bot.send_message(
+            winner_id,
+            f"🏆 *ВЫ ПОБЕДИЛИ В ДУЭЛИ!*\n\n"
+            f"🎲 Ваш бросок: {winner_roll}\n"
+            f"🎲 Бросок {loser_name}: {loser_roll}\n\n"
+            f"💰 Выигрыш: {format_money(prize)}"
+        )
+        await bot.send_message(
+            loser_id,
+            f"💥 *ВЫ ПРОИГРАЛИ В ДУЭЛИ!*\n\n"
+            f"🎲 Ваш бросок: {loser_roll}\n"
+            f"🎲 Бросок {winner_name}: {winner_roll}\n\n"
+            f"💸 Потеряно: {format_money(bet)}"
+        )
+        del active_duels[duel_id]
+
     await callback.answer()
 
 @dp.callback_query(F.data == "duel_decline")
@@ -1476,7 +1606,7 @@ async def duel_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-# ==================== ПЕРЕВОДЫ (без изменений) ====================
+# ==================== ПЕРЕВОДЫ ====================
 @dp.message(F.text == "🔁 Перевод")
 async def handle_transfer_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -2005,7 +2135,7 @@ async def handle_check_message(message: Message, state: FSMContext):
     max_uses = data.get('max_uses', 1)
     hours = data.get('hours', 24)
     custom_message = message.text if message.text != '-' else ""
-    
+
     bot_info = await bot.get_me()
     bot_username = bot_info.username
     if not bot_username:
@@ -2017,7 +2147,7 @@ async def handle_check_message(message: Message, state: FSMContext):
         )
         await state.clear()
         return
-    
+
     check_id = await create_gift_check(
         creator_id=ADMIN_ID,
         check_type=check_type,
@@ -2027,9 +2157,9 @@ async def handle_check_message(message: Message, state: FSMContext):
         hours=hours,
         message=custom_message
     )
-    
+
     check_link = f"https://t.me/{bot_username}?start={check_id}"
-    
+
     if check_type == 'money':
         check_info = f"💰 *Денежный чек на {format_money(amount)}*"
         reward_text = f"{format_money(amount)}"
@@ -2037,7 +2167,7 @@ async def handle_check_message(message: Message, state: FSMContext):
         item_name = next((i['name'] for i in SHOP_ITEMS if i["id"] == item_id), "Неизвестный товар")
         check_info = f"🎁 *Товарный чек на {item_name}*"
         reward_text = item_name
-    
+
     expires_at = datetime.now() + timedelta(hours=hours)
     check_text = (
         f"✅ *ЧЕК УСПЕШНО СОЗДАН!*\n\n"
@@ -2117,7 +2247,6 @@ async def handle_send_link(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_checks_list")
 async def handle_admin_checks_list(callback: CallbackQuery):
-    """Список активных чеков (ИСПРАВЛЕНО: убран Markdown)"""
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещен!", show_alert=True)
         return
@@ -2130,7 +2259,6 @@ async def handle_admin_checks_list(callback: CallbackQuery):
             )
             await callback.answer()
             return
-        
         checks_text = "🧾 АКТИВНЫЕ ЧЕКИ:\n\n"
         total_amount = 0
         for i, check in enumerate(active_checks[:10], 1):
@@ -2142,7 +2270,6 @@ async def handle_admin_checks_list(callback: CallbackQuery):
             else:
                 hours_left = "?"
                 expires_text = "⚠️ дата неизвестна"
-            
             if check['check_type'] == 'money':
                 amount = check.get('amount', 0)
                 check_info = f"💰 {format_money(amount)}"
@@ -2150,11 +2277,9 @@ async def handle_admin_checks_list(callback: CallbackQuery):
                 total_amount += amount * remaining
             else:
                 item_id = check.get('item_id', '?')
-                # Получаем имя предмета для красоты
                 item = next((i for i in SHOP_ITEMS if i["id"] == item_id), None)
                 item_name = item['name'] if item else item_id
                 check_info = f"🎁 {item_name}"
-            
             checks_text += (
                 f"{i}. {check['check_id'][:12]}...\n"
                 f"   {check_info} | 👥 {check['used_count']}/{check['max_uses']}\n"
@@ -2163,9 +2288,7 @@ async def handle_admin_checks_list(callback: CallbackQuery):
                 checks_text += f"   ⏳ {hours_left}ч | 📅 {expires_text}\n"
             else:
                 checks_text += f"   ⏳ {expires_text}\n"
-        
         checks_text += f"\n📊 Итого в обороте: {format_money(total_amount)}"
-        
         buttons = []
         for i, check in enumerate(active_checks[:5], 1):
             buttons.append([InlineKeyboardButton(
@@ -2173,7 +2296,6 @@ async def handle_admin_checks_list(callback: CallbackQuery):
                 callback_data=f"check_stats_{check['check_id']}"
             )])
         buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_checks_back")])
-        
         await callback.message.edit_text(
             checks_text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2186,9 +2308,9 @@ async def handle_admin_checks_list(callback: CallbackQuery):
             reply_markup=get_admin_checks_keyboard()
         )
         await callback.answer("❌ Ошибка", show_alert=True)
+
 @dp.callback_query(F.data.startswith("check_stats_"))
 async def handle_check_stats(callback: CallbackQuery):
-    """Статистика по чеку (ИСПРАВЛЕНО: без Markdown)"""
     if callback.from_user.id != ADMIN_ID:
         return
     check_id = callback.data[12:]
@@ -2196,17 +2318,17 @@ async def handle_check_stats(callback: CallbackQuery):
     if not stats:
         await callback.answer("❌ Чек не найден", show_alert=True)
         return
-    
+
     expires_at = safe_parse_datetime(stats.get('expires_at'))
     created_at = safe_parse_datetime(stats.get('created_at'))
-    
+
     if stats['check_type'] == 'money':
         check_info = f"💰 Денежный чек на {format_money(stats['amount'])}"
     else:
         item = next((i for i in SHOP_ITEMS if i["id"] == stats['item_id']), None)
         item_name = item['name'] if item else stats['item_id']
         check_info = f"🎁 Товарный чек на {item_name}"
-    
+
     bot_info = await bot.get_me()
     bot_username = bot_info.username
     if bot_username:
@@ -2214,7 +2336,7 @@ async def handle_check_stats(callback: CallbackQuery):
         link_text = f"🔗 Ссылка: {check_link}"
     else:
         link_text = "❌ У бота нет username!"
-    
+
     stats_text = (
         f"📊 СТАТИСТИКА ЧЕКА\n\n"
         f"{check_info}\n"
@@ -2226,7 +2348,7 @@ async def handle_check_stats(callback: CallbackQuery):
     )
     if stats.get('custom_message'):
         stats_text += f"💌 Сообщение: {stats['custom_message']}\n"
-    
+
     if stats['activations']:
         stats_text += f"\n🎯 Активировали ({len(stats['activations'])}):\n"
         for i, act in enumerate(stats['activations'][:5], 1):
@@ -2238,13 +2360,13 @@ async def handle_check_stats(callback: CallbackQuery):
             stats_text += f"... и ещё {len(stats['activations']) - 5} человек\n"
     else:
         stats_text += "\n🎯 Пока никто не активировал этот чек"
-    
+
     buttons = [
         [InlineKeyboardButton(text="📤 Отправить ссылку", callback_data=f"send_link_{check_id}")],
         [InlineKeyboardButton(text="🔙 К списку чеков", callback_data="admin_checks_list")],
         [InlineKeyboardButton(text="❌ Деактивировать чек", callback_data=f"check_deactivate_{check_id}")]
     ]
-    
+
     await callback.message.edit_text(
         stats_text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2301,8 +2423,7 @@ async def handle_statistics(message: Message):
         f"• Штрафов получено: {format_money(user.get('total_fines', 0))}\n"
         f"• Получок: {user.get('salary_count', 0)}\n"
         f"• Уложено асфальта: {user.get('asphalt_meters', 0):,} метров\n"
-        f"• Заработано на асфальте: {format_money(user.get('asphalt_earned', 0))}\n"
-        f"• Дуэлей выиграно/проиграно: ?\n\n"
+        f"• Заработано на асфальте: {format_money(user.get('asphalt_earned', 0))}\n\n"
     )
     if total_stats:
         stats_text += (
@@ -2345,8 +2466,7 @@ async def handle_effects(message: Message):
         effects_text += "💊 *Таблетки Нагирт:* нет\n\n"
     effects_text += f"📊 *Толерантность к Нагирту:* +{int((tolerance-1)*100)}%\n"
     if tolerance > 1.5:
-        effects_text += "\n🚨 *ВНИМАНИЕ!* Высокая толерантность!\n"
-        effects_text += "Эффект таблеток слабеет. Рекомендуется использовать антидот.\n"
+        effects_text += "\n🚨 *ВНИМАНИЕ!* Высокая толерантность!\nЭффект таблеток слабеет. Рекомендуется использовать антидот.\n"
     elif tolerance > 1.2:
         effects_text += "\n⚠️ *Предупреждение:* Толерантность повышена.\n"
     await message.answer(effects_text, parse_mode="Markdown")
@@ -2470,7 +2590,7 @@ async def on_startup():
     else:
         logger.info(f"✅ Username бота: @{bot_info.username}")
     asyncio.create_task(penalty_scheduler())
-    logger.info("✅ Бот запущен! Дуэль добавлена, Нагирт ужесточён, чеки исправлены.")
+    logger.info("✅ Бот запущен! Дуэль пошаговая, Нагирт ужесточён, чеки исправлены.")
 
 async def on_shutdown():
     logger.info("🛑 Бот останавливается...")
