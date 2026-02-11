@@ -1362,12 +1362,11 @@ async def handle_minigames(message: Message):
         f"• Штраф за брак: {format_money(ECONOMY_SETTINGS['asphalt_fine_min'])}-{format_money(ECONOMY_SETTINGS['asphalt_fine_max'])}\n"
         f"• Шанс успеха: 70% (с Нагиртом до 95%)\n"
         f"• Время работы: 30 секунд\n\n"
-        "⚔️ *Дуэль*\n"
+                "⚔️ *Дуэль*\n"
         f"• Ставка: от {format_money(ECONOMY_SETTINGS['duel_min_bet'])} до {format_money(ECONOMY_SETTINGS['duel_max_bet'])}\n"
         f"• Правила: вызов → ставка → бросок кубика по очереди\n"
-        f"• Бонус от Нагирта и БИЗНЕСОВ: +1 за каждые 20% бонуса\n"
-        f"• Таймаут: {DUEL_TIMEOUT} сек на ход\n\n"
-        f"💰 Ваш баланс: {format_money(user['balance'])}"
+        f"• Таймаут: {DUEL_TIMEOUT} сек на ход\n"
+        f"• **Никаких бонусов — только удача!** 🎲\n\n"
     )
     await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
 
@@ -1881,20 +1880,16 @@ async def duel_roll(callback: CallbackQuery):
         await callback.answer("❌ Сейчас не ваш ход или дуэль уже завершена", show_alert=True)
         return
 
-    effects = await get_active_nagirt_effects(user_id)
-    biz_bonuses = await get_total_business_bonuses(user_id)
-    duel_bonus = biz_bonuses["duel"]
-    game_boost = effects.get("game_boost", 0)
-    roll_bonus = int((game_boost + duel_bonus) * 5)
-    roll = random.randint(1, ECONOMY_SETTINGS['duel_dice_sides']) + roll_bonus
-    roll = max(1, roll)
+    # 🎲 ЧЕСТНЫЙ БРОСОК – БЕЗ БОНУСОВ
+    roll = random.randint(1, ECONOMY_SETTINGS['duel_dice_sides'])
+    roll_bonus = 0
 
     duel[f"{player}_roll"] = roll
     duel["last_action"] = datetime.now()
 
     await callback.message.edit_text(
         f"🎲 *ВЫ БРОСИЛИ КУБИК!*\n\n"
-        f"Результат: {roll} (базовый + бонус: +{roll_bonus})\n\n"
+        f"Результат: {roll}\n\n"
         f"⏳ Ожидайте броска противника...",
         parse_mode="Markdown"
     )
@@ -1959,7 +1954,6 @@ async def duel_roll(callback: CallbackQuery):
         # Победитель получает удвоенную ставку
         prize = bet * 2
         await update_balance(winner_id, prize, "duel_win", f"Победа в дуэли против {loser_name}, ставка {bet}")
-        # У проигравшего ставка уже списана
 
         await bot.send_message(
             winner_id,
@@ -1977,17 +1971,6 @@ async def duel_roll(callback: CallbackQuery):
         )
         del active_duels[duel_id]
 
-    await callback.answer()
-
-@dp.callback_query(F.data == "duel_decline")
-async def duel_decline(callback: CallbackQuery):
-    await callback.message.edit_text("❌ Вызов отклонён.")
-    await callback.answer()
-
-@dp.callback_query(F.data == "duel_cancel", DuelStates.waiting_confirmation)
-async def duel_cancel(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("❌ Дуэль отменена.")
-    await state.clear()
     await callback.answer()
 
 # ==================== БИЗНЕС-СИСТЕМА (ПОЛНЫЙ ИНТЕРФЕЙС С ТАЙМЕРОМ) ====================
