@@ -2117,6 +2117,7 @@ async def handle_send_link(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_checks_list")
 async def handle_admin_checks_list(callback: CallbackQuery):
+    """Список активных чеков (ИСПРАВЛЕНО: убран Markdown)"""
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещен!", show_alert=True)
         return
@@ -2124,14 +2125,13 @@ async def handle_admin_checks_list(callback: CallbackQuery):
         active_checks = await get_active_checks()
         if not active_checks:
             await callback.message.edit_text(
-                "📭 *Активных чеков нет*\n\n"
-                "Создайте первый чек через меню!",
-                parse_mode="Markdown",
+                "📭 Активных чеков нет\n\nСоздайте первый чек через меню!",
                 reply_markup=get_admin_checks_keyboard()
             )
             await callback.answer()
             return
-        checks_text = "🧾 *АКТИВНЫЕ ЧЕКИ:*\n\n"
+        
+        checks_text = "🧾 АКТИВНЫЕ ЧЕКИ:\n\n"
         total_amount = 0
         for i, check in enumerate(active_checks[:10], 1):
             expires_at = safe_parse_datetime(check.get('expires_at'))
@@ -2142,6 +2142,7 @@ async def handle_admin_checks_list(callback: CallbackQuery):
             else:
                 hours_left = "?"
                 expires_text = "⚠️ дата неизвестна"
+            
             if check['check_type'] == 'money':
                 amount = check.get('amount', 0)
                 check_info = f"💰 {format_money(amount)}"
@@ -2149,16 +2150,22 @@ async def handle_admin_checks_list(callback: CallbackQuery):
                 total_amount += amount * remaining
             else:
                 item_id = check.get('item_id', '?')
-                check_info = f"🎁 {item_id}"
+                # Получаем имя предмета для красоты
+                item = next((i for i in SHOP_ITEMS if i["id"] == item_id), None)
+                item_name = item['name'] if item else item_id
+                check_info = f"🎁 {item_name}"
+            
             checks_text += (
-                f"{i}. `{check['check_id'][:12]}...`\n"
+                f"{i}. {check['check_id'][:12]}...\n"
                 f"   {check_info} | 👥 {check['used_count']}/{check['max_uses']}\n"
             )
             if isinstance(hours_left, int):
                 checks_text += f"   ⏳ {hours_left}ч | 📅 {expires_text}\n"
             else:
                 checks_text += f"   ⏳ {expires_text}\n"
-        checks_text += f"\n📊 *Итого в обороте:* {format_money(total_amount)}"
+        
+        checks_text += f"\n📊 Итого в обороте: {format_money(total_amount)}"
+        
         buttons = []
         for i, check in enumerate(active_checks[:5], 1):
             buttons.append([InlineKeyboardButton(
@@ -2166,9 +2173,9 @@ async def handle_admin_checks_list(callback: CallbackQuery):
                 callback_data=f"check_stats_{check['check_id']}"
             )])
         buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_checks_back")])
+        
         await callback.message.edit_text(
             checks_text,
-            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
         )
         await callback.answer()
@@ -2179,9 +2186,9 @@ async def handle_admin_checks_list(callback: CallbackQuery):
             reply_markup=get_admin_checks_keyboard()
         )
         await callback.answer("❌ Ошибка", show_alert=True)
-
 @dp.callback_query(F.data.startswith("check_stats_"))
 async def handle_check_stats(callback: CallbackQuery):
+    """Статистика по чеку (ИСПРАВЛЕНО: без Markdown)"""
     if callback.from_user.id != ADMIN_ID:
         return
     check_id = callback.data[12:]
@@ -2189,21 +2196,27 @@ async def handle_check_stats(callback: CallbackQuery):
     if not stats:
         await callback.answer("❌ Чек не найден", show_alert=True)
         return
+    
     expires_at = safe_parse_datetime(stats.get('expires_at'))
     created_at = safe_parse_datetime(stats.get('created_at'))
+    
     if stats['check_type'] == 'money':
-        check_info = f"💰 *Денежный чек на {format_money(stats['amount'])}*"
+        check_info = f"💰 Денежный чек на {format_money(stats['amount'])}"
     else:
-        check_info = f"🎁 *Товарный чек ({stats['item_id']})*"
+        item = next((i for i in SHOP_ITEMS if i["id"] == stats['item_id']), None)
+        item_name = item['name'] if item else stats['item_id']
+        check_info = f"🎁 Товарный чек на {item_name}"
+    
     bot_info = await bot.get_me()
     bot_username = bot_info.username
     if bot_username:
         check_link = f"https://t.me/{bot_username}?start={check_id}"
-        link_text = f"🔗 *Ссылка:* `{check_link}`"
+        link_text = f"🔗 Ссылка: {check_link}"
     else:
-        link_text = "❌ *У бота нет username!*"
+        link_text = "❌ У бота нет username!"
+    
     stats_text = (
-        f"📊 *СТАТИСТИКА ЧЕКА*\n\n"
+        f"📊 СТАТИСТИКА ЧЕКА\n\n"
         f"{check_info}\n"
         f"👤 Создатель: {stats.get('creator_name', 'Админ')}\n"
         f"📅 Создан: {created_at.strftime('%d.%m.%Y %H:%M') if created_at else 'неизвестно'}\n"
@@ -2213,8 +2226,9 @@ async def handle_check_stats(callback: CallbackQuery):
     )
     if stats.get('custom_message'):
         stats_text += f"💌 Сообщение: {stats['custom_message']}\n"
+    
     if stats['activations']:
-        stats_text += f"\n🎯 *Активировали ({len(stats['activations'])}):*\n"
+        stats_text += f"\n🎯 Активировали ({len(stats['activations'])}):\n"
         for i, act in enumerate(stats['activations'][:5], 1):
             act_time = safe_parse_datetime(act.get('activated_at'))
             act_time_str = act_time.strftime('%H:%M') if act_time else '??'
@@ -2224,14 +2238,15 @@ async def handle_check_stats(callback: CallbackQuery):
             stats_text += f"... и ещё {len(stats['activations']) - 5} человек\n"
     else:
         stats_text += "\n🎯 Пока никто не активировал этот чек"
+    
     buttons = [
         [InlineKeyboardButton(text="📤 Отправить ссылку", callback_data=f"send_link_{check_id}")],
         [InlineKeyboardButton(text="🔙 К списку чеков", callback_data="admin_checks_list")],
         [InlineKeyboardButton(text="❌ Деактивировать чек", callback_data=f"check_deactivate_{check_id}")]
     ]
+    
     await callback.message.edit_text(
         stats_text,
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await callback.answer()
