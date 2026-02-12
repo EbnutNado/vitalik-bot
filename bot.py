@@ -2645,13 +2645,14 @@ async def cb_give_item_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # В конце обработчика give_item_recipient после успешной передачи:
-        await cmd_inventory(message, user_id=user_id)  # обновляем инвентарь отправителя
+    await cmd_inventory(message, user_id=user_id)  # обновляем инвентарь отправителя
 
 @dp.message(GiveItemStates.choosing_recipient)
 async def give_item_recipient(message: Message, state: FSMContext):
     user_id = message.from_user.id
     target = message.text.strip()
     recipient_id = None
+
     if target.startswith('@'):
         username = target[1:]
         async with aiosqlite.connect(DB_NAME) as db:
@@ -2674,19 +2675,25 @@ async def give_item_recipient(message: Message, state: FSMContext):
         except:
             await message.answer("❌ Неверный формат. Используй @username или ID.")
             return
+
     if recipient_id == user_id:
         await message.answer("❌ Нельзя передать предмет самому себе.")
         await state.clear()
         return
+
     data = await state.get_data()
     inv_id = data['give_item_id']
     success, msg = await give_item(user_id, recipient_id, inv_id)
     await message.answer(msg)
+
     if success:
         try:
             await bot.send_message(recipient_id, f"🎁 Тебе передали предмет! Проверь инвентарь.")
         except:
             pass
+        # ✅ Обновляем инвентарь отправителя – правильный отступ!
+        await cmd_inventory(message, user_id=user_id)
+
     await state.clear()
 
 # ==================== СИСТЕМА ДОЛГОВ ====================
