@@ -20,6 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import aiosqlite
+import re
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"  # ЗАМЕНИ!
@@ -50,7 +51,7 @@ ECONOMY_SETTINGS = {
     "asphalt_fine_max": 600,
     "roulette_min_bet": 100,
     "roulette_max_bet": 5000,
-    "roulette_win_chance": 0.42,
+    "roulette_win_chance": 0.49,
     "min_transfer": 100,
     "random_fine_interval_min": 1200,
     "random_fine_interval_max": 1800,
@@ -1001,6 +1002,16 @@ async def get_user_loans(user_id: int, as_lender: bool = False, as_borrower: boo
         cursor = await db.execute(query, params)
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+async def get_loan_by_id(loan_id: int) -> Optional[Dict]:
+    """Получить информацию о займе по ID."""
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute('''
+            SELECT * FROM loans WHERE id = ?
+        ''', (loan_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 # ==================== НОВЫЕ ФУНКЦИИ ТОПА НЕДЕЛИ ====================
 async def update_weekly_earnings(user_id: int, amount: int):
@@ -2558,20 +2569,41 @@ async def cmd_collect(message: Message):
 
 # ==================== ИНВЕНТАРЬ (НОВЫЕ ХЭНДЛЕРЫ) ====================
 @dp.message(F.text == "🎒 Инвентарь")
-async def cmd_inventory(message: Message):
-    user_id = message.from_user.id
+async def cmd_inventory(target: Union[Message, CallbackQuery], user_id: int = None):
+    """Универсальная функция показа инвентаря."""
+    if isinstance(target, CallbackQuery):
+        message = target.message
+        if user_id is None:
+            user_id = target.from_user.id
+        is_callback = True
+    else:
+        message = target
+        if user_id is None:
+            user_id = message.from_user.id
+        is_callback = False
+
     user = await get_user(user_id)
     if not user:
-        await message.answer("❌ Сначала зарегистрируйся через /start")
+        if is_callback:
+            await target.answer("❌ Сначала зарегистрируйся через /start", show_alert=True)
+        else:
+            await message.answer("❌ Сначала зарегистрируйся через /start")
         return
+
     inv = await get_inventory(user_id)
     slots = await get_inventory_slots(user_id)
+
     if not inv:
         text = f"🎒 *ИНВЕНТАРЬ*\n\nСлотов: {len(inv)}/{slots}\n\nУ тебя пока нет предметов. Купи в магазине!"
-        await message.answer(text, parse_mode="Markdown")
+        if is_callback:
+            await message.edit_text(text, parse_mode="Markdown")
+        else:
+            await message.answer(text, parse_mode="Markdown")
         return
+
     text = f"🎒 *ИНВЕНТАРЬ*\n\nСлотов: {len(inv)}/{slots}\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[])
+
     for idx, item in enumerate(inv, 1):
         expires = f" (истекает: {safe_parse_datetime(item['expires_at']).strftime('%d.%m %H:%M')})" if item['expires_at'] else ""
         text += f"{idx}. {item['item_name']}{expires}\n"
@@ -2580,7 +2612,11 @@ async def cmd_inventory(message: Message):
             InlineKeyboardButton(text=f"📤 Передать", callback_data=f"give_item_{item['id']}"),
             InlineKeyboardButton(text=f"🗑️ Выбросить", callback_data=f"delete_item_{item['id']}")
         ])
-    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+    if is_callback:
+        await message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("use_item_"))
 async def cb_use_item(callback: CallbackQuery):
@@ -2589,7 +2625,7 @@ async def cb_use_item(callback: CallbackQuery):
     success, msg = await use_item(user_id, inv_id)
     await callback.answer(msg, show_alert=True)
     if success:
-        await cmd_inventory(callback.message)
+        await cmd_inventory(callback, user_id=user_id)  # ← исправлено
 
 @dp.callback_query(F.data.startswith("delete_item_"))
 async def cb_delete_item(callback: CallbackQuery):
@@ -2598,7 +2634,7 @@ async def cb_delete_item(callback: CallbackQuery):
     success, msg = await delete_item(user_id, inv_id)
     await callback.answer(msg, show_alert=True)
     if success:
-        await cmd_inventory(callback.message)
+        await cmd_inventory(callback, user_id=user_id)  # ← исправлено
 
 @dp.callback_query(F.data.startswith("give_item_"))
 async def cb_give_item_start(callback: CallbackQuery, state: FSMContext):
@@ -2606,6 +2642,10 @@ async def cb_give_item_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(give_item_id=inv_id)
     await callback.message.answer("👥 Введите @username или ID получателя:")
     await state.set_state(GiveItemStates.choosing_recipient)
+    await callback.answer()
+
+# В конце обработчика give_item_recipient после успешной передачи:
+        await cmd_inventory(message, user_id=user_id)  # обновляем инвентарь отправителя
 
 @dp.message(GiveItemStates.choosing_recipient)
 async def give_item_recipient(message: Message, state: FSMContext):
@@ -2657,18 +2697,24 @@ async def cmd_loans_menu(message: Message):
     if not user:
         await message.answer("❌ Сначала зарегистрируйся.")
         return
+
     as_lender = await get_user_loans(user_id, as_lender=True)
     as_borrower = await get_user_loans(user_id, as_borrower=True)
+
     text = f"💰 *СИСТЕМА ДОЛГОВ*\n\n"
     text += f"📤 Ты дал в долг: {len(as_lender)} активных займов\n"
     text += f"📥 Ты должен: {len(as_borrower)} активных займов\n\n"
+    text += "Выбери действие:"
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💸 Дать в долг", callback_data="loan_give")],
         [InlineKeyboardButton(text="📋 Мои займы (кредитор)", callback_data="loan_my_lender")],
         [InlineKeyboardButton(text="📋 Мои долги (заёмщик)", callback_data="loan_my_borrower")]
     ])
+
     await message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
+# ----- ДАТЬ В ДОЛГ (ШАГИ) -----
 @dp.callback_query(F.data == "loan_give")
 async def loan_give_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("👥 Введите @username или ID получателя займа:")
@@ -2680,6 +2726,7 @@ async def loan_choose_borrower(message: Message, state: FSMContext):
     user_id = message.from_user.id
     target = message.text.strip()
     borrower_id = None
+
     if target.startswith('@'):
         username = target[1:]
         async with aiosqlite.connect(DB_NAME) as db:
@@ -2702,10 +2749,12 @@ async def loan_choose_borrower(message: Message, state: FSMContext):
         except:
             await message.answer("❌ Неверный формат. Используй @username или ID.")
             return
+
     if borrower_id == user_id:
         await message.answer("❌ Нельзя дать в долг самому себе.")
         await state.clear()
         return
+
     await state.update_data(borrower_id=borrower_id)
     await message.answer(f"💸 Введите сумму займа (мин. {format_money(LOAN_SETTINGS['min_amount'])}):")
     await state.set_state(LoanStates.entering_amount)
@@ -2734,20 +2783,25 @@ async def loan_enter_days(message: Message, state: FSMContext):
         if days < 1 or days > LOAN_SETTINGS["max_duration_days"]:
             await message.answer(f"❌ Срок должен быть от 1 до {LOAN_SETTINGS['max_duration_days']} дней.")
             return
+
         data = await state.get_data()
         borrower_id = data['borrower_id']
         amount = data['amount']
         borrower = await get_user(borrower_id)
+
         await state.update_data(days=days)
+        total_return = amount + int(amount * LOAN_SETTINGS['interest_rate'] * days)
+
         confirm_text = (
             f"📄 *ПОДТВЕРЖДЕНИЕ ЗАЙМА*\n\n"
             f"👤 Заёмщик: {borrower['full_name']}\n"
             f"💰 Сумма: {format_money(amount)}\n"
             f"📅 Срок: {days} дн.\n"
             f"📈 Процент: {int(LOAN_SETTINGS['interest_rate']*100)}% в день\n"
-            f"💎 К возврату: {format_money(amount + int(amount * LOAN_SETTINGS['interest_rate'] * days))}\n\n"
+            f"💎 К возврату: {format_money(total_return)}\n\n"
             f"Подтверждаешь?"
         )
+
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Подтвердить", callback_data="loan_confirm"),
              InlineKeyboardButton(text="❌ Отмена", callback_data="loan_cancel")]
@@ -2764,18 +2818,20 @@ async def loan_confirm(callback: CallbackQuery, state: FSMContext):
     borrower_id = data['borrower_id']
     amount = data['amount']
     days = data['days']
+
     success, msg, loan_id = await create_loan(lender_id, borrower_id, amount, days)
     await callback.message.edit_text(msg)
+
     if success:
         try:
             await bot.send_message(borrower_id,
                 f"💰 *Вам выдан займ!*\n\n"
-                f"Кредитор: {callback.from_user.full_name}\n"
-                f"Сумма: {format_money(amount)}\n"
-                f"Срок: {days} дн.\n"
-                f"Процент: {int(LOAN_SETTINGS['interest_rate']*100)}% в день\n"
-                f"ID займа: #{loan_id}\n\n"
-                f"Вернуть долг: /repay_{loan_id} или через меню долгов."
+                f"👤 Кредитор: {callback.from_user.full_name}\n"
+                f"💰 Сумма: {format_money(amount)}\n"
+                f"📅 Срок: {days} дн.\n"
+                f"📈 Процент: {int(LOAN_SETTINGS['interest_rate']*100)}% в день\n"
+                f"🆔 ID займа: #{loan_id}\n\n"
+                f"Вернуть долг можно через меню долгов или командой /repay_{loan_id}"
             )
         except:
             pass
@@ -2786,54 +2842,157 @@ async def loan_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Займ отменён.")
     await state.clear()
 
+# ----- ПРОСМОТР ЗАЙМОВ (КРЕДИТОР) -----
 @dp.callback_query(F.data == "loan_my_lender")
 async def loan_my_lender(callback: CallbackQuery):
     user_id = callback.from_user.id
     loans = await get_user_loans(user_id, as_lender=True)
+
     if not loans:
-        await callback.message.edit_text("📭 У вас нет активных выданных займов.")
+        await callback.message.edit_text(
+            "📭 У тебя нет активных выданных займов.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="loan_back_to_menu")]
+            ])
+        )
+        await callback.answer()
         return
-    text = "📤 *ВАШИ ВЫДАННЫЕ ЗАЙМЫ*\n\n"
+
+    text = "📤 *ТВОИ ВЫДАННЫЕ ЗАЙМЫ*\n\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+
     for loan in loans:
         borrower = await get_user(loan['borrower_id'])
         due = safe_parse_datetime(loan['due_date'])
         due_str = due.strftime('%d.%m.%Y') if due else 'неизвестно'
         total = loan['amount'] + int(loan['amount'] * loan['interest'])
-        text += f"🔹 Займ #{loan['id']}\n"
+
+        text += f"🔹 *Займ #{loan['id']}*\n"
         text += f"👤 Заёмщик: {borrower['full_name']}\n"
         text += f"💰 Сумма: {format_money(loan['amount'])}\n"
         text += f"💎 К возврату: {format_money(total)}\n"
-        text += f"📅 Срок: до {due_str}\n"
-        text += f"[Вызвать коллектора](коллектор_{loan['id']})\n\n"
-    await callback.message.edit_text(text, parse_mode="Markdown")
+        text += f"📅 Срок: до {due_str}\n\n"
+
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text=f"📢 Вызвать коллектора #{loan['id']}", callback_data=f"loan_collector_{loan['id']}")
+        ])
+
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="loan_back_to_menu")
+    ])
+
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
+# ----- ПРОСМОТР ДОЛГОВ (ЗАЁМЩИК) -----
 @dp.callback_query(F.data == "loan_my_borrower")
 async def loan_my_borrower(callback: CallbackQuery):
     user_id = callback.from_user.id
     loans = await get_user_loans(user_id, as_borrower=True)
+
     if not loans:
-        await callback.message.edit_text("📭 У вас нет активных долгов.")
+        await callback.message.edit_text(
+            "📭 У тебя нет активных долгов.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="loan_back_to_menu")]
+            ])
+        )
+        await callback.answer()
         return
-    text = "📥 *ВАШИ АКТИВНЫЕ ДОЛГИ*\n\n"
+
+    text = "📥 *ТВОИ АКТИВНЫЕ ДОЛГИ*\n\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+
     for loan in loans:
         lender = await get_user(loan['lender_id'])
         due = safe_parse_datetime(loan['due_date'])
         due_str = due.strftime('%d.%m.%Y') if due else 'неизвестно'
-        total = loan['amount'] + int(loan['amount'] * loan['interest'])
         days_left = (due - datetime.now()).days if due else 0
-        text += f"🔹 Займ #{loan['id']}\n"
+        total = loan['amount'] + int(loan['amount'] * loan['interest'])
+
+        text += f"🔹 *Займ #{loan['id']}*\n"
         text += f"👤 Кредитор: {lender['full_name']}\n"
         text += f"💰 Сумма: {format_money(loan['amount'])}\n"
         text += f"💎 К возврату: {format_money(total)}\n"
         text += f"⏳ Осталось дней: {days_left}\n"
-        text += f"[Вернуть долг](вернуть_{loan['id']})\n\n"
-    await callback.message.edit_text(text, parse_mode="Markdown")
+        text += f"📅 Срок: до {due_str}\n\n"
+
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text=f"💸 Вернуть долг #{loan['id']}", callback_data=f"loan_repay_{loan['id']}")
+        ])
+
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="loan_back_to_menu")
+    ])
+
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
-@dp.message(Command(commands=["repay_"]))
+# ----- КОЛЛЕКТОР -----
+@dp.callback_query(F.data.startswith("loan_collector_"))
+async def loan_collector_callback(callback: CallbackQuery):
+    loan_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    # Подтверждение
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, вызвать", callback_data=f"loan_collector_confirm_{loan_id}"),
+         InlineKeyboardButton(text="❌ Отмена", callback_data="loan_my_lender")]
+    ])
+    await callback.message.edit_text(
+        f"⚠️ *Вызов коллектора*\n\n"
+        f"Ты уверен? Услуга стоит {int(LOAN_SETTINGS['collector_fee']*100)}% от суммы займа.\n"
+        f"Коллектор попытается взыскать долг принудительно.",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("loan_collector_confirm_"))
+async def loan_collector_confirm(callback: CallbackQuery):
+    loan_id = int(callback.data.split("_")[3])
+    user_id = callback.from_user.id
+    success, msg = await call_collector(loan_id, user_id)
+    await callback.message.edit_text(msg)
+    await callback.answer()
+
+# ----- ВОЗВРАТ ДОЛГА -----
+@dp.callback_query(F.data.startswith("loan_repay_"))
+async def loan_repay_callback(callback: CallbackQuery):
+    loan_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    loan = await get_loan_by_id(loan_id)
+    if not loan:
+        await callback.answer("❌ Займ не найден.", show_alert=True)
+        return
+
+    total = loan['amount'] + int(loan['amount'] * loan['interest'])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить возврат", callback_data=f"loan_repay_confirm_{loan_id}"),
+         InlineKeyboardButton(text="❌ Отмена", callback_data="loan_my_borrower")]
+    ])
+    await callback.message.edit_text(
+        f"💸 *ПОДТВЕРЖДЕНИЕ ВОЗВРАТА*\n\n"
+        f"Займ #{loan_id}\n"
+        f"Сумма к возврату: {format_money(total)}\n\n"
+        f"Подтверди операцию:",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("loan_repay_confirm_"))
+async def loan_repay_confirm(callback: CallbackQuery):
+    loan_id = int(callback.data.split("_")[3])
+    user_id = callback.from_user.id
+    success, msg = await repay_loan(loan_id, user_id)
+    await callback.message.edit_text(msg)
+    await callback.answer()
+
+# ----- ВОЗВРАТ ПО КОМАНДЕ /repay_123 -----
+@dp.message(Command(re.compile(r"repay_\d+")))
 async def cmd_repay_loan(message: Message):
-    # Формат: /repay_123
     try:
         loan_id = int(message.text.split('_')[1])
         user_id = message.from_user.id
@@ -2841,6 +3000,12 @@ async def cmd_repay_loan(message: Message):
         await message.answer(msg)
     except:
         await message.answer("❌ Неверный формат. Используй /repay_123")
+
+# ----- НАЗАД В МЕНЮ ДОЛГОВ -----
+@dp.callback_query(F.data == "loan_back_to_menu")
+async def loan_back_to_menu(callback: CallbackQuery):
+    await cmd_loans_menu(callback.message)
+    await callback.answer()
 
 # ==================== ТОП НЕДЕЛИ ====================
 @dp.message(Command("top"))
