@@ -1,6 +1,7 @@
 """
 Telegram бот "Виталик Штрафующий"
-✅ Чеки | ✅ Дуэль | ✅ Нагирт | ✅ БИЗНЕСЫ | ✅ ИНВЕНТАРЬ | ✅ ДОЛГИ | ✅ ТОП НЕДЕЛИ
+✅ Чеки исправлены | ✅ Дуэль без ухода в минус | ✅ Нагирт ужесточён
+✅ БИЗНЕС-СИСТЕМА: таймер сбора, сумма дохода, кулдаун 1 час
 """
 
 import asyncio
@@ -20,11 +21,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import aiosqlite
-import re
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"  # ЗАМЕНИ!
-ADMIN_ID = 5775839902  # ЗАМЕНИ!
+BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"  # ЗАМЕНИ НА СВОЙ!
+ADMIN_ID = 5775839902  # ЗАМЕНИ НА СВОЙ ID
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,8 +34,8 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 # ==================== УВЕДОМЛЕНИЯ О БИЗНЕСЕ ====================
-last_business_notification = {}
-BUSINESS_NOTIFICATION_COOLDOWN = 3000
+last_business_notification = {}  # {user_id: timestamp последнего уведомления}
+BUSINESS_NOTIFICATION_COOLDOWN = 3000  # 50 минут в секундах (чтобы не спамить)
 
 # ==================== НАСТРОЙКИ ЭКОНОМИКИ ====================
 ECONOMY_SETTINGS = {
@@ -51,7 +51,7 @@ ECONOMY_SETTINGS = {
     "asphalt_fine_max": 600,
     "roulette_min_bet": 100,
     "roulette_max_bet": 5000,
-    "roulette_win_chance": 0.49,
+    "roulette_win_chance": 0.42,
     "min_transfer": 100,
     "random_fine_interval_min": 1200,
     "random_fine_interval_max": 1800,
@@ -60,15 +60,7 @@ ECONOMY_SETTINGS = {
     "duel_dice_sides": 6,
 }
 
-# ==================== НАСТРОЙКИ ДОЛГОВ ====================
-LOAN_SETTINGS = {
-    "interest_rate": 0.20,        # 20% в сутки
-    "min_amount": 1000,
-    "max_duration_days": 7,
-    "collector_fee": 0.10,        # 10% за услуги коллектора
-}
-
-# ==================== ТОВАРЫ МАГАЗИНА (В ИНВЕНТАРЬ) ====================
+# ==================== ТОВАРЫ МАГАЗИНА ====================
 SHOP_ITEMS = [
     {"id": "bonus_coin", "name": "🪙 Бонусная монета", "price": 1500,
      "description": "+15% к получке на 8 часов", "type": "boost", "value": 0.15, "hours": 8},
@@ -80,6 +72,7 @@ SHOP_ITEMS = [
      "description": "Полный иммунитет к штрафам на 12 часов", "type": "protection", "hours": 12},
     {"id": "insurance", "name": "🛡️ Страховка", "price": 4000,
      "description": "Страховка от одного штрафа (возмещает 80%)", "type": "insurance"},
+
     {"id": "nagirt_light", "name": "💊 Нагирт Лайт", "price": 2000,
      "description": "+15% к зарплате, +20% к играм на 2 часа. Риск штрафа +10%",
      "type": "pill", "effect_salary": 0.15, "effect_game": 0.2, "hours": 2,
@@ -98,8 +91,6 @@ SHOP_ITEMS = [
      "description": "Шанс выиграть до 10000₽!", "type": "lottery"},
     {"id": "instant_salary", "name": "⏱️ Мгновенная получка", "price": 8000,
      "description": "Сразу получаешь зарплату без ожидания", "type": "instant"},
-    {"id": "inventory_slot", "name": "📦 Дополнительный слот", "price": 5000,
-     "description": "+1 слот в инвентаре (навсегда)", "type": "inventory_slot", "slots": 1},
 ]
 
 # ==================== БИЗНЕСЫ ====================
@@ -125,7 +116,7 @@ BUSINESS_TYPES = {
         "price": 10000,
         "base_income": 150,
         "salary_bonus": 0.02,
-        "duel_bonus": 0.0,
+        "duel_bonus": 0.01,
         "asphalt_bonus": 0.0,
         "max_level": 5,
         "upgrades": {
@@ -210,7 +201,7 @@ BUSINESS_TYPES = {
         "price": 1000000,
         "base_income": 20000,
         "salary_bonus": 0.15,
-        "duel_bonus": 0.0,
+        "duel_bonus": 0.05,
         "asphalt_bonus": 0.05,
         "max_level": 8,
         "upgrades": {
@@ -250,12 +241,6 @@ async def init_db():
                 registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # Добавляем колонку inventory_slots, если её нет
-        try:
-            await db.execute('ALTER TABLE players ADD COLUMN inventory_slots INTEGER DEFAULT 20')
-        except:
-            pass
-
         await db.execute('''
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -328,7 +313,8 @@ async def init_db():
                 received_item TEXT
             )
         ''')
-        # Бизнесы
+
+        # НОВЫЕ ТАБЛИЦЫ ДЛЯ БИЗНЕСОВ
         await db.execute('''
             CREATE TABLE IF NOT EXISTS businesses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -357,59 +343,8 @@ async def init_db():
                 FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
             )
         ''')
-        # ========== НОВЫЕ ТАБЛИЦЫ ==========
-        # ИНВЕНТАРЬ
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS inventory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                item_id TEXT NOT NULL,
-                item_name TEXT NOT NULL,
-                item_type TEXT NOT NULL,
-                item_value REAL DEFAULT 0,
-                item_hours INTEGER DEFAULT 0,
-                is_active BOOLEAN DEFAULT 0,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES players(user_id) ON DELETE CASCADE
-            )
-        ''')
-        # ДОЛГИ
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS loans (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                lender_id INTEGER NOT NULL,
-                borrower_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                interest REAL NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                due_date TIMESTAMP NOT NULL,
-                repaid BOOLEAN DEFAULT 0,
-                repaid_at TIMESTAMP,
-                collector_used BOOLEAN DEFAULT 0,
-                FOREIGN KEY (lender_id) REFERENCES players(user_id),
-                FOREIGN KEY (borrower_id) REFERENCES players(user_id)
-            )
-        ''')
-                # ЕЖЕНЕДЕЛЬНЫЙ ТОП — ИСПРАВЛЕНО
-                # ========== ЕЖЕНЕДЕЛЬНЫЙ ТОП ==========
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS weekly_top (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                week_start DATE NOT NULL,
-                earnings INTEGER DEFAULT 0,
-                rank INTEGER,
-                rewarded BOOLEAN DEFAULT 0,
-                FOREIGN KEY (user_id) REFERENCES players(user_id),
-                UNIQUE(user_id, week_start)
-            )
-        ''')
-        await db.execute('''
-            CREATE INDEX IF NOT EXISTS idx_weekly_top_week ON weekly_top(week_start)
-        ''')
         await db.commit()
-        logger.info("✅ База данных инициализирована (полная версия)")
+        logger.info("✅ База данных инициализирована (с бизнесами)")
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def safe_parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
@@ -485,7 +420,7 @@ async def get_all_users() -> List[Dict[str, Any]]:
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
-# ==================== НАГИРТ ====================
+# ==================== НАГИРТ – ЖЁСТЧЕ ====================
 async def add_nagirt_pill(user_id: int, pill_type: str, effect: float, hours: int, side_effects: str = ""):
     expires_at = datetime.now() + timedelta(hours=hours)
     async with aiosqlite.connect(DB_NAME) as db:
@@ -503,6 +438,7 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
             (user_id, datetime.now().isoformat())
         )
         rows = await cursor.fetchall()
+
     effects = {
         "salary_boost": 0.0,
         "game_boost": 0.0,
@@ -510,6 +446,7 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
         "has_active": len(rows) > 0,
         "fine_chance_mod": 0.0
     }
+
     for row in rows:
         pill_type, strength, side_effects = row
         if pill_type == "nagirt_light":
@@ -526,6 +463,7 @@ async def get_active_nagirt_effects(user_id: int) -> Dict[str, Any]:
             effects["fine_chance_mod"] += 0.4
         if side_effects:
             effects["side_effects"].append(side_effects)
+
     return effects
 
 async def get_nagirt_tolerance(user_id: int) -> float:
@@ -598,11 +536,14 @@ async def buy_business(user_id: int, biz_key: str) -> tuple[bool, str]:
     biz = BUSINESS_TYPES.get(biz_key)
     if not biz:
         return False, "❌ Такого бизнеса нет."
+
     user = await get_user(user_id)
     if not user:
         return False, "❌ Сначала зарегистрируйся."
+
     if user['balance'] < biz['price']:
         return False, f"❌ Не хватает денег. Нужно {format_money(biz['price'])}."
+
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             "INSERT INTO businesses (owner_id, biz_type, base_income) VALUES (?, ?, ?)",
@@ -617,6 +558,7 @@ async def buy_business(user_id: int, biz_key: str) -> tuple[bool, str]:
             (user_id, biz['price'], f"Покупка {biz['name']}")
         )
         await db.commit()
+
     return True, "✅ Бизнес куплен!"
 
 async def calculate_business_income(business: Dict) -> int:
@@ -632,24 +574,30 @@ async def calculate_business_income(business: Dict) -> int:
     return base + bonus
 
 async def collect_business_income(user_id: int) -> int:
+    """Собирает доход со всех бизнесов, у которых прошёл час. Возвращает сумму."""
     businesses = await get_user_businesses(user_id)
     total_income = 0
     now = datetime.now()
+
     for biz in businesses:
         last_collect = biz.get('collect_cooldown')
         if last_collect:
             last_time = safe_parse_datetime(last_collect)
             if last_time and (now - last_time).total_seconds() < 3600:
                 continue
+
         income_per_hour = await calculate_business_income(biz)
         total_income += income_per_hour
+
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute(
                 "UPDATE businesses SET collect_cooldown = ? WHERE id = ?",
                 (now.isoformat(), biz['id'])
             )
             await db.commit()
+
     if total_income > 0:
+        # Налог Виталика (15%)
         if random.random() < 0.15:
             tax = int(total_income * 0.3)
             total_income -= tax
@@ -661,27 +609,40 @@ async def collect_business_income(user_id: int) -> int:
                 f"Осталось дохода: {format_money(total_income)}",
                 parse_mode="Markdown"
             )
+
         await update_balance(user_id, total_income, 'business_income', 'Пассивный доход с бизнесов')
-        await update_weekly_earnings(user_id, total_income)  # ТОП НЕДЕЛИ
+
     return total_income
 
 async def get_business_collect_status(user_id: int) -> Dict[str, Any]:
+    """
+    Возвращает статус сбора дохода:
+    - total_income: сколько можно собрать сейчас (0 если ничего)
+    - can_collect: bool (есть ли хоть один бизнес с готовым доходом)
+    - next_collect_time: datetime самого близкого бизнеса, который станет доступен
+    - seconds_left: секунд до следующего сбора (если can_collect=False)
+    - total_per_hour: общий доход в час
+    """
     businesses = await get_user_businesses(user_id)
     total_per_hour = 0
     now = datetime.now()
     next_collect_time = None
     total_income_now = 0
+
     for biz in businesses:
         income = await calculate_business_income(biz)
         total_per_hour += income
+
         last_collect = biz.get('collect_cooldown')
         if not last_collect:
             total_income_now += income
             continue
+
         last_time = safe_parse_datetime(last_collect)
         if not last_time:
             total_income_now += income
             continue
+
         time_passed = (now - last_time).total_seconds()
         if time_passed >= 3600:
             total_income_now += income
@@ -689,6 +650,7 @@ async def get_business_collect_status(user_id: int) -> Dict[str, Any]:
             collect_available = last_time + timedelta(hours=1)
             if next_collect_time is None or collect_available < next_collect_time:
                 next_collect_time = collect_available
+
     result = {
         "total_income": total_income_now,
         "can_collect": total_income_now > 0,
@@ -717,18 +679,23 @@ async def upgrade_business(user_id: int, business_id: int, upgrade_lvl: int) -> 
         if not biz:
             return False, "❌ Бизнес не найден или не принадлежит тебе."
         biz = dict(biz)
+
     config = BUSINESS_TYPES[biz['biz_type']]
     upgrade = config['upgrades'].get(upgrade_lvl)
     if not upgrade:
         return False, "❌ Улучшение не найдено."
+
     existing = await get_business_upgrades(business_id)
     if any(u['upgrade_level'] == upgrade_lvl for u in existing):
         return False, "❌ Это улучшение уже установлено."
+
     if biz['upgrade_level'] + 1 != upgrade_lvl:
         return False, f"❌ Сначала нужно улучшить до уровня {biz['upgrade_level'] + 1}."
+
     user = await get_user(user_id)
     if user['balance'] < upgrade['cost']:
         return False, f"❌ Не хватает {format_money(upgrade['cost'])}."
+
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             '''INSERT INTO business_upgrades
@@ -752,16 +719,19 @@ async def upgrade_business(user_id: int, business_id: int, upgrade_lvl: int) -> 
             (user_id, upgrade['cost'], f"Улучшение {upgrade['name']} для {config['name']}")
         )
         await db.commit()
+
     return True, f"✅ Улучшение '{upgrade['name']}' установлено!"
 
 async def get_total_business_bonuses(user_id: int) -> Dict[str, float]:
     businesses = await get_user_businesses(user_id)
     bonuses = {"salary": 0.0, "duel": 0.0, "asphalt": 0.0}
+
     for biz in businesses:
         config = BUSINESS_TYPES[biz['biz_type']]
         bonuses["salary"] += config.get('salary_bonus', 0.0)
         bonuses["duel"] += config.get('duel_bonus', 0.0)
         bonuses["asphalt"] += config.get('asphalt_bonus', 0.0)
+
         upgrades = await get_business_upgrades(biz['id'])
         for up in upgrades:
             bonuses["salary"] += up.get('bonus_percent', 0.0)
@@ -776,346 +746,12 @@ def format_time(seconds: int) -> str:
     secs = seconds % 60
     return f"{minutes}:{secs:02d}"
 
-# ==================== НОВЫЕ ФУНКЦИИ ИНВЕНТАРЯ ====================
-async def get_inventory(user_id: int) -> List[Dict]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM inventory WHERE user_id = ? AND is_active = 0 ORDER BY created_at DESC",
-            (user_id,)
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-async def get_inventory_slots(user_id: int) -> int:
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("SELECT inventory_slots FROM players WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        return row[0] if row else 20
-
-async def add_to_inventory(user_id: int, item: Dict) -> tuple[bool, str]:
-    slots_max = await get_inventory_slots(user_id)
-    inv = await get_inventory(user_id)
-    if len(inv) >= slots_max:
-        return False, f"❌ В инвентаре нет места (макс. {slots_max}). Купи дополнительный слот."
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('''
-            INSERT INTO inventory 
-            (user_id, item_id, item_name, item_type, item_value, item_hours)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (
-            user_id, item['id'], item['name'], item['type'],
-            item.get('value', 0) or item.get('effect_salary', 0),
-            item.get('hours', 0)
-        ))
-        await db.commit()
-    return True, f"✅ {item['name']} добавлен в инвентарь."
-
-async def use_item(user_id: int, inv_id: int) -> tuple[bool, str]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM inventory WHERE id = ? AND user_id = ? AND is_active = 0",
-            (inv_id, user_id)
-        )
-        item = await cursor.fetchone()
-        if not item:
-            return False, "❌ Предмет не найден или уже активирован."
-        item = dict(item)
-        await db.execute(
-            "UPDATE inventory SET is_active = 1, expires_at = ? WHERE id = ?",
-            ((datetime.now() + timedelta(hours=item['item_hours'])).isoformat() if item['item_hours'] > 0 else None, inv_id)
-        )
-        await db.commit()
-    if item['item_type'] == 'boost':
-        await add_boost(user_id, item['item_id'], item['item_value'], item['item_hours'])
-        return True, f"✅ Буст +{int(item['item_value']*100)}% активирован на {item['item_hours']}ч!"
-    elif item['item_type'] == 'pill':
-        await add_nagirt_pill(user_id, item['item_id'], item['item_value'], item['item_hours'], "")
-        return True, f"💊 {item['item_name']} активирован! +{int(item['item_value']*100)}% к эффектам."
-    elif item['item_type'] == 'protection':
-        if item['item_id'] == 'day_off':
-            immunity_until = (datetime.now() + timedelta(hours=item['item_hours'])).isoformat()
-            async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute("UPDATE players SET penalty_immunity_until = ? WHERE user_id = ?", (immunity_until, user_id))
-                await db.commit()
-            return True, f"✅ Иммунитет к штрафам на {item['item_hours']}ч!"
-        elif item['item_id'] == 'insurance':
-            await add_boost(user_id, "insurance", 0.8, 24)
-            return True, "✅ Страховка активирована!"
-    elif item['item_type'] == 'antidote':
-        await reset_nagirt_tolerance(user_id)
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("DELETE FROM nagirt_pills WHERE user_id = ?", (user_id,))
-            await db.commit()
-        return True, "💉 Антидот применен!"
-    elif item['item_type'] == 'lottery':
-        if random.random() <= 0.25:
-            win = random.randint(2000, 10000)
-            await update_balance(user_id, win, "lottery", "Выигрыш в лотерее")
-            await update_weekly_earnings(user_id, win)
-            return True, f"🎉 Лотерея: +{format_money(win)}!"
-        else:
-            return True, "😔 Лотерея: ничего не выпало."
-    elif item['item_type'] == 'instant':
-        salary = random.randint(ECONOMY_SETTINGS["salary_min"], ECONOMY_SETTINGS["salary_max"])
-        await update_balance(user_id, salary, "instant", "Мгновенная получка")
-        await update_weekly_earnings(user_id, salary)
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE players SET last_salary = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
-            await db.commit()
-        return True, f"⏱️ Мгновенная получка: {format_money(salary)}!"
-    elif item['item_type'] == 'inventory_slot':
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE players SET inventory_slots = inventory_slots + ? WHERE user_id = ?", (item.get('slots', 1), user_id))
-            await db.commit()
-        slots = await get_inventory_slots(user_id)
-        return True, f"📦 Слот расширен! Теперь у тебя {slots} слотов."
-    return False, "❌ Неизвестный тип предмета."
-
-async def give_item(from_user: int, to_user: int, inv_id: int) -> tuple[bool, str]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM inventory WHERE id = ? AND user_id = ? AND is_active = 0",
-            (inv_id, from_user)
-        )
-        item = await cursor.fetchone()
-        if not item:
-            return False, "❌ Предмет не найден или уже активирован."
-        to_inv = await get_inventory(to_user)
-        slots_max = await get_inventory_slots(to_user)
-        if len(to_inv) >= slots_max:
-            return False, f"❌ У получателя нет места в инвентаре."
-        await db.execute(
-            "UPDATE inventory SET user_id = ? WHERE id = ?",
-            (to_user, inv_id)
-        )
-        await db.commit()
-    return True, f"✅ Предмет {item['item_name']} передан пользователю."
-
-async def delete_item(user_id: int, inv_id: int) -> tuple[bool, str]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "DELETE FROM inventory WHERE id = ? AND user_id = ? AND is_active = 0",
-            (inv_id, user_id)
-        )
-        await db.commit()
-        if cursor.rowcount > 0:
-            return True, "🗑️ Предмет удалён из инвентаря."
-        else:
-            return False, "❌ Предмет не найден."
-
-# ==================== НОВЫЕ ФУНКЦИИ ДОЛГОВ ====================
-async def create_loan(lender_id: int, borrower_id: int, amount: int, days: int) -> tuple[bool, str, int]:
-    if amount < LOAN_SETTINGS["min_amount"]:
-        return False, f"❌ Минимальная сумма займа: {format_money(LOAN_SETTINGS['min_amount'])}", 0
-    if days > LOAN_SETTINGS["max_duration_days"]:
-        return False, f"❌ Максимальный срок: {LOAN_SETTINGS['max_duration_days']} дней", 0
-    lender = await get_user(lender_id)
-    borrower = await get_user(borrower_id)
-    if not lender or not borrower:
-        return False, "❌ Пользователь не найден", 0
-    if lender['balance'] < amount:
-        return False, "❌ У кредитора недостаточно средств", 0
-    await update_balance(lender_id, -amount, "loan_given", f"Выдан займ пользователю {borrower['full_name']}")
-    await update_balance(borrower_id, amount, "loan_taken", f"Получен займ от {lender['full_name']}")
-    due_date = datetime.now() + timedelta(days=days)
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute('''
-            INSERT INTO loans (lender_id, borrower_id, amount, interest, due_date)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (lender_id, borrower_id, amount, LOAN_SETTINGS["interest_rate"], due_date.isoformat()))
-        await db.commit()
-        loan_id = cursor.lastrowid
-    return True, f"✅ Займ на {format_money(amount)} оформлен. Срок: {days} дн., процент: {int(LOAN_SETTINGS['interest_rate']*100)}%", loan_id
-
-async def repay_loan(loan_id: int, user_id: int) -> tuple[bool, str]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute('''
-            SELECT * FROM loans WHERE id = ? AND repaid = 0
-        ''', (loan_id,))
-        loan = await cursor.fetchone()
-        if not loan:
-            return False, "❌ Займ не найден или уже погашен."
-        loan = dict(loan)
-        if loan['borrower_id'] != user_id:
-            return False, "❌ Только заёмщик может вернуть долг."
-        total = loan['amount'] + int(loan['amount'] * loan['interest'])
-        borrower = await get_user(user_id)
-        if borrower['balance'] < total:
-            return False, f"❌ Недостаточно средств. Нужно {format_money(total)}."
-        await update_balance(user_id, -total, "loan_repay", f"Возврат займа #{loan_id} + проценты")
-        await update_balance(loan['lender_id'], total, "loan_received", f"Получен возврат займа #{loan_id}")
-        await db.execute('''
-            UPDATE loans SET repaid = 1, repaid_at = ? WHERE id = ?
-        ''', (datetime.now().isoformat(), loan_id))
-        await db.commit()
-    return True, f"✅ Долг погашен. Кредитор получил {format_money(total)}."
-
-async def call_collector(loan_id: int, user_id: int) -> tuple[bool, str]:
-    """Вызвать коллектора (кредитор или админ). Долг закрывается принудительно."""
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute('''
-            SELECT * FROM loans WHERE id = ? AND repaid = 0
-        ''', (loan_id,))
-        loan = await cursor.fetchone()
-        if not loan:
-            return False, "❌ Займ не найден или уже погашен."
-        loan = dict(loan)
-
-        if loan['lender_id'] != user_id and user_id != ADMIN_ID:
-            return False, "❌ Только кредитор или админ могут вызвать коллектора."
-        if loan['collector_used']:
-            return False, "❌ Коллектор уже был вызван."
-
-        # Оплата услуг коллектора
-        fee = int(loan['amount'] * LOAN_SETTINGS["collector_fee"])
-        lender = await get_user(loan['lender_id'])
-        if lender['balance'] < fee:
-            return False, f"❌ У кредитора недостаточно средств для оплаты коллектора ({format_money(fee)})."
-
-        await update_balance(loan['lender_id'], -fee, "collector_fee", f"Оплата коллектора за займ #{loan_id}")
-
-        # Взыскание долга
-        total = loan['amount'] + int(loan['amount'] * loan['interest'])
-        borrower = await get_user(loan['borrower_id'])
-        if borrower['balance'] >= total:
-            await update_balance(loan['borrower_id'], -total, "collector_debit", f"Принудительное взыскание долга #{loan_id}")
-            await update_balance(loan['lender_id'], total, "collector_payout", f"Взыскано коллектором по займу #{loan_id}")
-            payout_message = f"💰 Полностью взыскано {format_money(total)}."
-        else:
-            # Частичное взыскание
-            if borrower['balance'] > 0:
-                await update_balance(loan['borrower_id'], -borrower['balance'], "collector_debit", f"Частичное взыскание долга #{loan_id}")
-                await update_balance(loan['lender_id'], borrower['balance'], "collector_payout", f"Частично взыскано коллектором #{loan_id}")
-                payout_message = f"⚠️ Частично взыскано {format_money(borrower['balance'])}."
-            else:
-                payout_message = "😔 У должника нет денег для взыскания."
-
-            # Штраф за невыплату
-            await update_balance(loan['borrower_id'], -1000, "penalty", "Штраф за невыплату долга (коллектор)")
-
-        # Помечаем долг как погашенный (коллектор выполнил работу)
-        await db.execute('''
-            UPDATE loans SET repaid = 1, repaid_at = ?, collector_used = 1 WHERE id = ?
-        ''', (datetime.now().isoformat(), loan_id))
-        await db.commit()
-
-    return True, f"✅ Коллектор отработал. {payout_message} Долг закрыт."
-
-async def get_user_loans(user_id: int, as_lender: bool = False, as_borrower: bool = False) -> List[Dict]:
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        query = "SELECT * FROM loans WHERE repaid = 0"
-        params = []
-        if as_lender:
-            query += " AND lender_id = ?"
-            params.append(user_id)
-        if as_borrower:
-            query += " AND borrower_id = ?"
-            params.append(user_id)
-        cursor = await db.execute(query, params)
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-async def get_loan_by_id(loan_id: int) -> Optional[Dict]:
-    """Получить информацию о займе по ID."""
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute('''
-            SELECT * FROM loans WHERE id = ?
-        ''', (loan_id,))
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-# ==================== НОВЫЕ ФУНКЦИИ ТОПА НЕДЕЛИ ====================
-async def update_weekly_earnings(user_id: int, amount: int):
-    """Добавить заработок игрока в текущую неделю."""
-    today = datetime.now().date()
-    week_start = today - timedelta(days=today.weekday())
-    week_start_str = week_start.isoformat()
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "SELECT earnings FROM weekly_top WHERE user_id = ? AND week_start = ?",
-            (user_id, week_start_str)
-        )
-        row = await cursor.fetchone()
-        if row:
-            await db.execute(
-                "UPDATE weekly_top SET earnings = earnings + ? WHERE user_id = ? AND week_start = ?",
-                (amount, user_id, week_start_str)
-            )
-        else:
-            await db.execute(
-                "INSERT INTO weekly_top (user_id, week_start, earnings) VALUES (?, ?, ?)",
-                (user_id, week_start_str, amount)
-            )
-        await db.commit()
-
-async def get_weekly_top(week_start: Optional[str] = None) -> List[Dict]:
-    if not week_start:
-        today = datetime.now().date()
-        week_start = (today - timedelta(days=today.weekday())).isoformat()
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute('''
-            SELECT wt.*, p.full_name 
-            FROM weekly_top wt
-            JOIN players p ON wt.user_id = p.user_id
-            WHERE wt.week_start = ? AND wt.earnings > 0
-            ORDER BY wt.earnings DESC
-            LIMIT 10
-        ''', (week_start,))
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-async def reward_weekly_top():
-    """Выдать награды за прошлую неделю (вызывается по расписанию)."""
-    today = datetime.now().date()
-    # Предыдущая неделя: понедельник прошлой недели
-    last_week_start = (today - timedelta(days=today.weekday() + 7)).isoformat()
-
-    top = await get_weekly_top(last_week_start)
-    rewards = [50000, 30000, 20000, 15000, 10000, 8000, 6000, 4000, 2000, 1000]
-
-    for idx, entry in enumerate(top):
-        rank = idx + 1
-        if rank <= 10:
-            prize = rewards[rank-1]
-            user_id = entry['user_id']
-            # Проверяем, не выдавали ли уже награду
-            if entry.get('rewarded'):
-                continue
-            await update_balance(user_id, prize, "weekly_top", f"Награда за {rank} место в топе недели")
-            # Отметить как награждённого
-            async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute('''
-                    UPDATE weekly_top SET rank = ?, rewarded = 1 WHERE user_id = ? AND week_start = ?
-                ''', (rank, user_id, last_week_start))
-                await db.commit()
-            try:
-                await bot.send_message(user_id,
-                    f"🏆 *ТОП НЕДЕЛИ!*\n\n"
-                    f"Ты занял {rank} место по заработку!\n"
-                    f"Награда: {format_money(prize)} уже на твоём балансе.\n"
-                    f"Так держать! 👔",
-                    parse_mode="Markdown"
-                )
-            except:
-                pass
-    logger.info(f"✅ Награды за неделю {last_week_start} выданы.")
-
 # ==================== КЛАВИАТУРЫ ====================
 def get_main_keyboard(user_id: int = None) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="💰 Получка"), KeyboardButton(text="🛒 Магазин")],
         [KeyboardButton(text="🔁 Перевод"), KeyboardButton(text="🎮 Мини-игры")],
         [KeyboardButton(text="🏢 Бизнес"), KeyboardButton(text="📊 Статистика")],
-        [KeyboardButton(text="🎒 Инвентарь"), KeyboardButton(text="💰 Долги")],
         [KeyboardButton(text="💊 Эффекты")]
     ]
     if user_id == ADMIN_ID:
@@ -1127,7 +763,8 @@ def get_shop_keyboard() -> InlineKeyboardMarkup:
     boosts = [item for item in SHOP_ITEMS if item.get("type") == "boost"]
     pills = [item for item in SHOP_ITEMS if item.get("type") == "pill"]
     protection = [item for item in SHOP_ITEMS if item.get("type") in ["protection", "insurance"]]
-    other = [item for item in SHOP_ITEMS if item.get("type") in ["antidote", "lottery", "instant", "inventory_slot"]]
+    other = [item for item in SHOP_ITEMS if item.get("type") in ["antidote", "lottery", "instant"]]
+
     if boosts:
         buttons.append([InlineKeyboardButton(text="📈 БУСТЫ К ЗАРПЛАТЕ", callback_data="none")])
         for item in boosts:
@@ -1200,7 +837,7 @@ def get_items_for_checks() -> InlineKeyboardMarkup:
     buttons = []
     boosts = [item for item in SHOP_ITEMS if item.get("type") == "boost"]
     pills = [item for item in SHOP_ITEMS if item.get("type") == "pill"]
-    other = [item for item in SHOP_ITEMS if item.get("type") in ["antidote", "insurance", "lottery", "instant", "inventory_slot"]]
+    other = [item for item in SHOP_ITEMS if item.get("type") in ["antidote", "insurance", "lottery", "instant"]]
     if boosts:
         buttons.append([InlineKeyboardButton(text="📈 БУСТЫ", callback_data="none")])
         for item in boosts[:3]:
@@ -1244,17 +881,6 @@ class DuelStates(StatesGroup):
     choosing_opponent = State()
     waiting_bet_amount = State()
     waiting_confirmation = State()
-
-# ========== НОВЫЕ СОСТОЯНИЯ ==========
-class LoanStates(StatesGroup):
-    choosing_borrower = State()
-    entering_amount = State()
-    entering_days = State()
-    confirming = State()
-
-class GiveItemStates(StatesGroup):
-    choosing_recipient = State()
-    choosing_item = State()
 
 # ==================== АКТИВНЫЕ ДУЭЛИ ====================
 active_duels = {}
@@ -1323,7 +949,6 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
             if check['check_type'] == 'money':
                 amount = check['amount']
                 await update_balance(user_id, amount, "check", f"Активация чека {check_id}")
-                await update_weekly_earnings(user_id, amount)
                 await db.execute('''
                     UPDATE check_activations 
                     SET received_amount = ?
@@ -1335,18 +960,17 @@ async def activate_gift_check_by_link(user_id: int, check_id: str) -> Dict[str, 
                 item_id = check['item_id']
                 item = next((i for i in SHOP_ITEMS if i["id"] == item_id), None)
                 if item:
-                    # Вместо немедленной активации - в инвентарь
-                    inv_success, inv_msg = await add_to_inventory(user_id, item)
-                    if inv_success:
-                        reward_text = f"{item['name']} (в инвентаре)"
-                    else:
-                        reward_text = f"{item['name']} (не влез, обратись к админу)"
+                    if item.get("type") == "boost":
+                        await add_boost(user_id, item["id"], item["value"], item["hours"])
+                    elif item.get("type") == "pill":
+                        await add_nagirt_pill(user_id, item["id"], item.get("effect_salary", 0), item["hours"])
                     await db.execute('''
                         UPDATE check_activations 
                         SET received_item = ?
                         WHERE check_id = ? AND user_id = ?
                     ''', (item['name'], check_id, user_id))
                     await db.commit()
+                    reward_text = f"{item['name']}"
                 else:
                     reward_text = "неизвестный предмет"
         except Exception as e:
@@ -1413,8 +1037,7 @@ async def deactivate_check(check_id: str):
             UPDATE gift_checks SET is_active = 0 WHERE check_id = ?
         ''', (check_id,))
         await db.commit()
-
-# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
+        # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     args = message.text.split()
@@ -1456,9 +1079,6 @@ async def cmd_start(message: Message):
         f"• 🎮 Мини-игры (рулетка, асфальт, ДУЭЛЬ)\n"
         f"• 💊 Таблетки Нагирт (риск/награда)\n"
         f"• 🏢 БИЗНЕСЫ — пассивный доход, бонусы, прокачка!\n"
-        f"• 🎒 ИНВЕНТАРЬ — храни и используй предметы!\n"
-        f"• 💰 ДОЛГИ — давай в долг под проценты!\n"
-        f"• 🏆 ТОП НЕДЕЛИ — соревнуйся и получай награды!\n"
         f"• 📊 Статистика и рейтинг\n\n"
     )
     if tolerance > 1.0:
@@ -1485,7 +1105,7 @@ async def handle_check_activation(message: Message, check_id: str):
             f"⚡ *Случайные проверки:* каждые 20-30 минут\n\n"
         )
         if nagirt_effects["has_active"]:
-            welcome_text += f"💊 *Активные таблетки:* +{int(nagirt_effects['salary_boost']*100)}% к зарплате\n"
+            welcome_text += f"💊 *Активные таблетки:* +{int(nagirt_effects['salary_boost']*100)}%\n"
             welcome_text += f"⚠️ Риск штрафа: {ECONOMY_SETTINGS['fine_chance']+nagirt_effects['fine_chance_mod']:.0%}\n\n"
         welcome_text += (
             f"📊 *Доступные функции:*\n"
@@ -1495,9 +1115,6 @@ async def handle_check_activation(message: Message, check_id: str):
             f"• 🎮 Мини-игры (рулетка, асфальт, ДУЭЛЬ)\n"
             f"• 💊 Таблетки Нагирт (риск/награда)\n"
             f"• 🏢 БИЗНЕСЫ — пассивный доход, бонусы, прокачка!\n"
-            f"• 🎒 ИНВЕНТАРЬ — храни и используй предметы!\n"
-            f"• 💰 ДОЛГИ — давай в долг под проценты!\n"
-            f"• 🏆 ТОП НЕДЕЛИ — соревнуйся и получай награды!\n"
             f"• 📊 Статистика и рейтинг\n\n"
         )
         if tolerance > 1.0:
@@ -1527,9 +1144,7 @@ async def handle_check_activation(message: Message, check_id: str):
         f"• 🛒 Магазин с бустами и таблетками\n"
         f"• 🎮 Мини-игры (рулетка, асфальт, ДУЭЛЬ)\n"
         f"• 🔁 Переводы другим игрокам\n"
-        f"• 🏢 Бизнес-империя — пассивный доход!\n"
-        f"• 🎒 Инвентарь — храни предметы!\n"
-        f"• 💰 Система долгов — давай в долг под проценты!\n\n"
+        f"• 🏢 Бизнес-империя — пассивный доход!\n\n"
         f"*Добро пожаловать в компанию Виталика!* 👔"
     )
     await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
@@ -1580,7 +1195,6 @@ async def handle_paycheck(message: Message):
     total_multiplier = 1.0 + boost_multiplier + nagirt_effects["salary_boost"] + salary_bonus
     final_salary = int(base_salary * total_multiplier)
     await update_balance(user_id, final_salary, "salary", f"💸 Зарплата (x{total_multiplier:.2f})")
-    await update_weekly_earnings(user_id, final_salary)  # ТОП НЕДЕЛИ
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE players SET last_salary = ? WHERE user_id = ?", (current_time.isoformat(), user_id))
         await db.commit()
@@ -1614,7 +1228,7 @@ async def handle_paycheck(message: Message):
         response += f"💬 *Виталик:* '{random.choice(comments)}'"
     await message.answer(response, parse_mode="Markdown")
 
-# ----- МАГАЗИН (НОВЫЙ, С ДОБАВЛЕНИЕМ В ИНВЕНТАРЬ) -----
+# ----- МАГАЗИН -----
 @dp.message(F.text == "🛒 Магазин")
 async def handle_shop(message: Message):
     user_id = message.from_user.id
@@ -1637,7 +1251,6 @@ async def handle_shop(message: Message):
         "• 📈 **Бусты** - увеличивают зарплату\n"
         "• 💊 **Нагирт** - мощные усилители с высоким риском\n"
         "• 🛡️ **Защита** - от штрафов и проверок\n"
-        "• 📦 **Инвентарь** - дополнительные слоты\n"
         "• 🎁 **Разное** - лотереи и экстренные опции\n\n"
         "⚠️ *Таблетки Нагирт имеют побочные эффекты и вызывают привыкание!*"
     )
@@ -1659,7 +1272,6 @@ async def handle_buy_item(callback: CallbackQuery):
         await callback.answer(f"❌ Недостаточно средств! Нужно {format_money(item['price'])}", show_alert=True)
         return
 
-    # Списание денег
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE players SET balance = balance - ? WHERE user_id = ?", (item['price'], user_id))
         await db.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user_id, item['name'], item['price']))
@@ -1667,24 +1279,66 @@ async def handle_buy_item(callback: CallbackQuery):
                          (user_id, item['price'], f"Покупка: {item['name']}"))
         await db.commit()
 
-    # Добавляем в инвентарь
-    if item['type'] in ['boost', 'pill', 'protection', 'antidote', 'lottery', 'instant', 'inventory_slot']:
-        success, msg = await add_to_inventory(user_id, item)
-        if not success:
-            # Возврат денег, если нет места
-            await update_balance(user_id, item['price'], "refund", f"Возврат за {item['name']} (нет места)")
-            await callback.answer(msg, show_alert=True)
-            return
-        response_text = f"✅ {item['name']} куплен и помещён в инвентарь!"
-    else:
-        response_text = "✅ Покупка завершена."
+    bonus_text = ""
+    if item.get("type") == "boost":
+        await add_boost(user_id, item["id"], item["value"], item["hours"])
+        bonus_text = f"✅ Буст активирован! +{int(item['value']*100)}% к зарплате на {item['hours']}ч"
+    elif item.get("type") == "protection":
+        if item["id"] == "day_off":
+            immunity_until = (datetime.now() + timedelta(hours=item["hours"])).isoformat()
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute("UPDATE players SET penalty_immunity_until = ? WHERE user_id = ?", (immunity_until, user_id))
+                await db.commit()
+            bonus_text = f"✅ Иммунитет к штрафам активирован на {item['hours']}ч!"
+        elif item["id"] == "insurance":
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute("INSERT INTO boosts (user_id, boost_type, boost_value, expires_at) VALUES (?, ?, ?, ?)",
+                                 (user_id, "insurance", 0.8, (datetime.now() + timedelta(hours=24)).isoformat()))
+                await db.commit()
+            bonus_text = "✅ Страховка активирована! Следующий штраф будет возмещен на 80%"
+    elif item.get("type") == "pill":
+        tolerance = await get_nagirt_tolerance(user_id)
+        real_salary_boost = item["effect_salary"] / tolerance
+        real_game_boost = item["effect_game"] / tolerance
+        side_effects = ""
+        if random.randint(1, 100) <= item.get("side_effect_chance", 0):
+            side_effects = random.choice(["Головокружение", "Тошнота", "Слабость", "Дрожь в руках", "Нарушение координации", "Галлюцинации", "Паранойя"])
+        await add_nagirt_pill(user_id, item["id"], (real_salary_boost+real_game_boost)/2, item["hours"], side_effects)
+        await update_nagirt_tolerance(user_id, increase=0.15)
+        bonus_text = f"💊 Таблетка принята! +{int(real_salary_boost*100)}% к зарплате, +{int(real_game_boost*100)}% к играм на {item['hours']}ч"
+        if side_effects:
+            bonus_text += f"\n⚠️ Побочный эффект: {side_effects}"
+        if tolerance > 1.2:
+            bonus_text += f"\n📉 Толерантность: +{int((tolerance-1)*100)}% (эффект ослаблен)"
+    elif item.get("type") == "antidote":
+        await reset_nagirt_tolerance(user_id)
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("DELETE FROM nagirt_pills WHERE user_id = ?", (user_id,))
+            await db.commit()
+        bonus_text = "💉 Антидот применен! Все эффекты таблеток сняты, толерантность сброшена."
+    elif item.get("type") == "lottery":
+        if random.random() <= 0.25:
+            win_amount = random.randint(2000, 10000)
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute("UPDATE players SET balance = balance + ? WHERE user_id = ?", (win_amount, user_id))
+                await db.commit()
+            bonus_text = f"🎉 ДЖЕКПОТ! Вы выиграли {format_money(win_amount)}!"
+        else:
+            bonus_text = "😔 Не повезло... Попробуй еще раз!"
+    elif item.get("type") == "instant":
+        salary = random.randint(ECONOMY_SETTINGS["salary_min"], ECONOMY_SETTINGS["salary_max"])
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE players SET balance = balance + ?, last_salary = ? WHERE user_id = ?",
+                             (salary, datetime.now().isoformat(), user_id))
+            await db.commit()
+        bonus_text = f"⏱️ Мгновенная зарплата: {format_money(salary)}"
 
     user = await get_user(user_id)
     response = (
         f"✅ *Покупка завершена*\n\n"
         f"📦 Товар: {item['name']}\n"
         f"💰 Стоимость: {format_money(item['price'])}\n"
-        f"🎁 {response_text}\n\n"
+        f"🎁 {bonus_text}\n\n"
         f"💳 Остаток: {format_money(user['balance'])}"
     )
     try:
@@ -1712,12 +1366,11 @@ async def handle_minigames(message: Message):
         f"• Штраф за брак: {format_money(ECONOMY_SETTINGS['asphalt_fine_min'])}-{format_money(ECONOMY_SETTINGS['asphalt_fine_max'])}\n"
         f"• Шанс успеха: 70% (с Нагиртом до 95%)\n"
         f"• Время работы: 30 секунд\n\n"
-        "⚔️ *Дуэль*\n"
+                "⚔️ *Дуэль*\n"
         f"• Ставка: от {format_money(ECONOMY_SETTINGS['duel_min_bet'])} до {format_money(ECONOMY_SETTINGS['duel_max_bet'])}\n"
         f"• Правила: вызов → ставка → бросок кубика по очереди\n"
         f"• Таймаут: {DUEL_TIMEOUT} сек на ход\n"
         f"• **Никаких бонусов — только удача!** 🎲\n\n"
-        f"💰 Ваш баланс: {format_money(user['balance'])}"
     )
     await message.answer(games_text, parse_mode="Markdown", reply_markup=get_minigames_keyboard())
 
@@ -1776,7 +1429,6 @@ async def handle_roulette_bet(message: Message, state: FSMContext):
                 await db.execute("INSERT INTO transactions (user_id, type, amount, description) VALUES (?, ?, ?, ?)",
                                  (user_id, 'roulette_win', bet, f"Выигрыш в рулетке: ставка {bet}₽"))
                 await db.commit()
-            await update_weekly_earnings(user_id, bet)
             user = await get_user(user_id)
             result_text = (
                 f"🎰 *РУЛЕТКА*\n\n"
@@ -1904,7 +1556,6 @@ async def handle_lay_asphalt(callback: CallbackQuery):
                 VALUES (?, ?, ?, ?)
             ''', (user_id, 'asphalt', earnings, 'Укладка асфальта' + (' + Нагирт' if nagirt_effects["has_active"] else '')))
             await db.commit()
-        await update_weekly_earnings(user_id, earnings)  # ТОП НЕДЕЛИ
 
         user = await get_user(user_id)
         result_text = (
@@ -2000,13 +1651,14 @@ async def handle_asphalt_wait(callback: CallbackQuery):
     else:
         await callback.answer("✅ Можно укладывать асфальт!", show_alert=True)
 
-# ==================== ДУЭЛЬ (ЧЕСТНАЯ, БЕЗ БОНУСОВ) ====================
+# ==================== ДУЭЛЬ (ПОШАГОВАЯ, БЕЗ УХОДА В МИНУС) ====================
 async def duel_cancel_by_timeout(duel_id: str, challenger_id: int, acceptor_id: int, bet: int):
     await asyncio.sleep(DUEL_TIMEOUT)
     if duel_id not in active_duels:
         return
     duel = active_duels[duel_id]
     if duel["status"] != "finished":
+        # Возвращаем ставки
         await update_balance(challenger_id, bet, "duel_refund", "Возврат ставки (таймаут)")
         await update_balance(acceptor_id, bet, "duel_refund", "Возврат ставки (таймаут)")
         try:
@@ -2157,6 +1809,7 @@ async def duel_accept(callback: CallbackQuery):
         await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
         return
 
+    # Жёсткая проверка баланса
     if challenger['balance'] < bet:
         await callback.message.edit_text("❌ У противника уже нет денег для дуэли. Вызов отменён.")
         return
@@ -2164,6 +1817,7 @@ async def duel_accept(callback: CallbackQuery):
         await callback.message.edit_text("❌ У вас недостаточно средств для участия в дуэли.")
         return
 
+    # Списываем ставки через update_balance (с защитой от минуса)
     await update_balance(challenger_id, -bet, "duel_bet", f"Ставка в дуэли против {acceptor['full_name']}")
     await update_balance(acceptor_id, -bet, "duel_bet", f"Ставка в дуэли против {challenger['full_name']}")
 
@@ -2230,6 +1884,7 @@ async def duel_roll(callback: CallbackQuery):
         await callback.answer("❌ Сейчас не ваш ход или дуэль уже завершена", show_alert=True)
         return
 
+    # 🎲 ЧЕСТНЫЙ БРОСОК – БЕЗ БОНУСОВ
     roll = random.randint(1, ECONOMY_SETTINGS['duel_dice_sides'])
     roll_bonus = 0
 
@@ -2279,6 +1934,7 @@ async def duel_roll(callback: CallbackQuery):
             winner_roll = acceptor_roll
             loser_roll = challenger_roll
         else:
+            # Ничья – возвращаем ставки
             await update_balance(duel["challenger_id"], bet, "duel_refund", "Возврат ставки (ничья)")
             await update_balance(duel["acceptor_id"], bet, "duel_refund", "Возврат ставки (ничья)")
             await bot.send_message(
@@ -2299,9 +1955,9 @@ async def duel_roll(callback: CallbackQuery):
             await callback.answer()
             return
 
+        # Победитель получает удвоенную ставку
         prize = bet * 2
         await update_balance(winner_id, prize, "duel_win", f"Победа в дуэли против {loser_name}, ставка {bet}")
-        await update_weekly_earnings(winner_id, bet)  # ТОП НЕДЕЛИ (выигрыш)
 
         await bot.send_message(
             winner_id,
@@ -2321,19 +1977,9 @@ async def duel_roll(callback: CallbackQuery):
 
     await callback.answer()
 
-@dp.callback_query(F.data == "duel_decline")
-async def duel_decline(callback: CallbackQuery):
-    await callback.message.edit_text("❌ Вызов отклонён.")
-    await callback.answer()
-
-@dp.callback_query(F.data == "duel_cancel", DuelStates.waiting_confirmation)
-async def duel_cancel(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("❌ Дуэль отменена.")
-    await state.clear()
-    await callback.answer()
-
-# ==================== БИЗНЕС-СИСТЕМА ====================
+# ==================== БИЗНЕС-СИСТЕМА (ПОЛНЫЙ ИНТЕРФЕЙС С ТАЙМЕРОМ) ====================
 async def cmd_business_menu(target: Union[Message, CallbackQuery], user_id: int = None):
+    """Универсальная функция для показа меню бизнесов."""
     if isinstance(target, CallbackQuery):
         message = target.message
         if user_id is None:
@@ -2405,8 +2051,10 @@ async def handle_business_button(message: Message):
 async def biz_shop(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = await get_user(user_id)
+
     text = "🏪 *МАГАЗИН БИЗНЕСОВ*\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[])
+
     for key, biz in BUSINESS_TYPES.items():
         text += f"**{biz['name']}** — {format_money(biz['price'])}\n"
         text += f"_{biz['description']}_\n"
@@ -2418,12 +2066,15 @@ async def biz_shop(callback: CallbackQuery):
         if biz.get('asphalt_bonus'):
             text += f"🛣️ +{int(biz['asphalt_bonus']*100)}% к асфальту\n"
         text += "\n"
+
         kb.inline_keyboard.append([
             InlineKeyboardButton(text=f"✅ Купить {biz['name']}", callback_data=f"biz_buy_{key}")
         ])
+
     kb.inline_keyboard.append([
         InlineKeyboardButton(text="🔙 Назад", callback_data="biz_back_to_menu")
     ])
+
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
@@ -2439,6 +2090,7 @@ async def biz_buy(callback: CallbackQuery):
 async def biz_my(callback: CallbackQuery):
     user_id = callback.from_user.id
     biz_list = await get_user_businesses(user_id)
+
     if not biz_list:
         await callback.message.edit_text(
             "❌ У тебя ещё нет бизнеса.\nКупи первый через меню!",
@@ -2449,24 +2101,31 @@ async def biz_my(callback: CallbackQuery):
         )
         await callback.answer()
         return
+
     text = "📋 *МОИ ПРЕДПРИЯТИЯ*\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[])
+
     total_income = 0
     for biz in biz_list:
         config = BUSINESS_TYPES[biz['biz_type']]
         income = await calculate_business_income(biz)
         total_income += income
+
         text += f"**{config['name']}** (ур. {biz['upgrade_level']})\n"
         text += f"💰 Доход: {format_money(income)}/ч\n"
         text += f"❤️ Прочность: {biz['health']}%\n\n"
+
         kb.inline_keyboard.append([
             InlineKeyboardButton(text=f"🔧 {config['name']}", callback_data=f"biz_info_{biz['id']}")
         ])
+
     text += f"💵 **Общий доход:** {format_money(total_income)}/ч"
+
     kb.inline_keyboard.append([
         InlineKeyboardButton(text="💰 Собрать доход", callback_data="biz_collect"),
         InlineKeyboardButton(text="🔙 Назад", callback_data="biz_back_to_menu")
     ])
+
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
@@ -2474,6 +2133,7 @@ async def biz_my(callback: CallbackQuery):
 async def biz_info(callback: CallbackQuery):
     biz_id = int(callback.data[9:])
     user_id = callback.from_user.id
+
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -2481,14 +2141,17 @@ async def biz_info(callback: CallbackQuery):
             (biz_id, user_id)
         )
         biz = await cursor.fetchone()
+
     if not biz:
         await callback.answer("❌ Бизнес не найден или не принадлежит тебе", show_alert=True)
         return
+
     biz = dict(biz)
     config = BUSINESS_TYPES[biz['biz_type']]
     income = await calculate_business_income(biz)
     upgrades_installed = await get_business_upgrades(biz_id)
     installed_levels = [u['upgrade_level'] for u in upgrades_installed]
+
     text = (
         f"🏭 **{config['name']}**\n"
         f"📊 Уровень прокачки: {biz['upgrade_level']}/{config.get('max_level', 3)}\n"
@@ -2496,7 +2159,9 @@ async def biz_info(callback: CallbackQuery):
         f"❤️ Состояние: {biz['health']}%\n\n"
         f"**📈 Улучшения:**\n"
     )
+
     kb = InlineKeyboardMarkup(inline_keyboard=[])
+
     for lvl, up in config.get('upgrades', {}).items():
         status = "✅" if lvl in installed_levels else "❌"
         if lvl in installed_levels:
@@ -2509,11 +2174,14 @@ async def biz_info(callback: CallbackQuery):
             ])
         else:
             text += f"• 🔒 Уровень {lvl} (требуется прокачка)\n"
+
     if not config.get('upgrades'):
         text += "Нет доступных улучшений.\n"
+
     kb.inline_keyboard.append([
         InlineKeyboardButton(text="🔙 К списку", callback_data="biz_my")
     ])
+
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
@@ -2523,8 +2191,10 @@ async def biz_upgrade(callback: CallbackQuery):
     biz_id = int(parts[2])
     lvl = int(parts[3])
     user_id = callback.from_user.id
+
     success, msg = await upgrade_business(user_id, biz_id, lvl)
     await callback.answer(msg, show_alert=True)
+
     if success:
         await biz_info(callback)
 
@@ -2532,9 +2202,11 @@ async def biz_upgrade(callback: CallbackQuery):
 async def biz_collect(callback: CallbackQuery):
     user_id = callback.from_user.id
     amount = await collect_business_income(user_id)
+
     if amount > 0:
         status = await get_business_collect_status(user_id)
         await callback.answer(f"💰 Собрано {format_money(amount)}!", show_alert=False)
+
         text = (
             f"💰 *ДОХОД СОБРАН!*\n\n"
             f"✅ Вы получили: {format_money(amount)}\n"
@@ -2552,9 +2224,11 @@ async def biz_collect_wait(callback: CallbackQuery):
     user_id = callback.from_user.id
     status = await get_business_collect_status(user_id)
     if status['can_collect']:
+        # Уже можно собрать, обновим меню
         await cmd_business_menu(callback, user_id=user_id)
         await callback.answer()
         return
+
     if status['seconds_left'] > 0:
         minutes = status['seconds_left'] // 60
         seconds = status['seconds_left'] % 60
@@ -2588,471 +2262,6 @@ async def cmd_collect(message: Message):
             await message.answer(f"❌ Нет дохода для сбора.\n⏳ Следующий сбор через {minutes} мин {seconds} сек.")
         else:
             await message.answer("❌ Нет дохода для сбора (возможно, нет бизнесов или кулдаун 1 час).")
-
-# ==================== ИНВЕНТАРЬ (НОВЫЕ ХЭНДЛЕРЫ) ====================
-@dp.message(F.text == "🎒 Инвентарь")
-async def cmd_inventory(target: Union[Message, CallbackQuery], user_id: int = None):
-    """Универсальная функция показа инвентаря."""
-    if isinstance(target, CallbackQuery):
-        message = target.message
-        if user_id is None:
-            user_id = target.from_user.id
-        is_callback = True
-    else:
-        message = target
-        if user_id is None:
-            user_id = message.from_user.id
-        is_callback = False
-
-    user = await get_user(user_id)
-    if not user:
-        if is_callback:
-            await target.answer("❌ Сначала зарегистрируйся через /start", show_alert=True)
-        else:
-            await message.answer("❌ Сначала зарегистрируйся через /start")
-        return
-
-    inv = await get_inventory(user_id)
-    slots = await get_inventory_slots(user_id)
-
-    if not inv:
-        text = f"🎒 *ИНВЕНТАРЬ*\n\nСлотов: {len(inv)}/{slots}\n\nУ тебя пока нет предметов. Купи в магазине!"
-        if is_callback:
-            await message.edit_text(text, parse_mode="Markdown")
-        else:
-            await message.answer(text, parse_mode="Markdown")
-        return
-
-    text = f"🎒 *ИНВЕНТАРЬ*\n\nСлотов: {len(inv)}/{slots}\n\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-
-    for idx, item in enumerate(inv, 1):
-        expires = f" (истекает: {safe_parse_datetime(item['expires_at']).strftime('%d.%m %H:%M')})" if item['expires_at'] else ""
-        text += f"{idx}. {item['item_name']}{expires}\n"
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"🎯 Исп. {idx}", callback_data=f"use_item_{item['id']}"),
-            InlineKeyboardButton(text=f"📤 Передать", callback_data=f"give_item_{item['id']}"),
-            InlineKeyboardButton(text=f"🗑️ Выбросить", callback_data=f"delete_item_{item['id']}")
-        ])
-
-    if is_callback:
-        await message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
-    else:
-        await message.answer(text, parse_mode="Markdown", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("use_item_"))
-async def cb_use_item(callback: CallbackQuery):
-    inv_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
-    success, msg = await use_item(user_id, inv_id)
-    await callback.answer(msg, show_alert=True)
-    if success:
-        await cmd_inventory(callback, user_id=user_id)  # ← исправлено
-
-@dp.callback_query(F.data.startswith("delete_item_"))
-async def cb_delete_item(callback: CallbackQuery):
-    inv_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
-    success, msg = await delete_item(user_id, inv_id)
-    await callback.answer(msg, show_alert=True)
-    if success:
-        await cmd_inventory(callback, user_id=user_id)  # ← исправлено
-
-@dp.callback_query(F.data.startswith("give_item_"))
-async def cb_give_item_start(callback: CallbackQuery, state: FSMContext):
-    inv_id = int(callback.data.split("_")[2])
-    await state.update_data(give_item_id=inv_id)
-    await callback.message.answer("👥 Введите @username или ID получателя:")
-    await state.set_state(GiveItemStates.choosing_recipient)
-    await callback.answer()
-
-# В конце обработчика give_item_recipient после успешной передачи:
-    await cmd_inventory(message, user_id=user_id)  # обновляем инвентарь отправителя
-
-@dp.message(GiveItemStates.choosing_recipient)
-async def give_item_recipient(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    target = message.text.strip()
-    recipient_id = None
-
-    if target.startswith('@'):
-        username = target[1:]
-        async with aiosqlite.connect(DB_NAME) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT user_id FROM players WHERE username = ?", (username,))
-            row = await cursor.fetchone()
-            if not row:
-                await message.answer("❌ Пользователь не найден.")
-                await state.clear()
-                return
-            recipient_id = row['user_id']
-    else:
-        try:
-            recipient_id = int(target)
-            user = await get_user(recipient_id)
-            if not user:
-                await message.answer("❌ Пользователь не найден.")
-                await state.clear()
-                return
-        except:
-            await message.answer("❌ Неверный формат. Используй @username или ID.")
-            return
-
-    if recipient_id == user_id:
-        await message.answer("❌ Нельзя передать предмет самому себе.")
-        await state.clear()
-        return
-
-    data = await state.get_data()
-    inv_id = data['give_item_id']
-    success, msg = await give_item(user_id, recipient_id, inv_id)
-    await message.answer(msg)
-
-    if success:
-        try:
-            await bot.send_message(recipient_id, f"🎁 Тебе передали предмет! Проверь инвентарь.")
-        except:
-            pass
-        # ✅ Обновляем инвентарь отправителя – правильный отступ!
-        await cmd_inventory(message, user_id=user_id)
-
-    await state.clear()
-
-# ==================== СИСТЕМА ДОЛГОВ ====================
-@dp.message(F.text == "💰 Долги")
-async def cmd_loans_menu(message: Message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    if not user:
-        await message.answer("❌ Сначала зарегистрируйся.")
-        return
-
-    as_lender = await get_user_loans(user_id, as_lender=True)
-    as_borrower = await get_user_loans(user_id, as_borrower=True)
-
-    text = f"💰 *СИСТЕМА ДОЛГОВ*\n\n"
-    text += f"📤 Ты дал в долг: {len(as_lender)} активных займов\n"
-    text += f"📥 Ты должен: {len(as_borrower)} активных займов\n\n"
-    text += "Выбери действие:"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💸 Дать в долг", callback_data="loan_give")],
-        [InlineKeyboardButton(text="📋 Мои займы (кредитор)", callback_data="loan_my_lender")],
-        [InlineKeyboardButton(text="📋 Мои долги (заёмщик)", callback_data="loan_my_borrower")]
-    ])
-
-    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
-
-# ----- ДАТЬ В ДОЛГ (ШАГИ) -----
-@dp.callback_query(F.data == "loan_give")
-async def loan_give_start(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("👥 Введите @username или ID получателя займа:")
-    await state.set_state(LoanStates.choosing_borrower)
-    await callback.answer()
-
-@dp.message(LoanStates.choosing_borrower)
-async def loan_choose_borrower(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    target = message.text.strip()
-    borrower_id = None
-
-    if target.startswith('@'):
-        username = target[1:]
-        async with aiosqlite.connect(DB_NAME) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT user_id FROM players WHERE username = ?", (username,))
-            row = await cursor.fetchone()
-            if not row:
-                await message.answer("❌ Пользователь не найден.")
-                await state.clear()
-                return
-            borrower_id = row['user_id']
-    else:
-        try:
-            borrower_id = int(target)
-            user = await get_user(borrower_id)
-            if not user:
-                await message.answer("❌ Пользователь не найден.")
-                await state.clear()
-                return
-        except:
-            await message.answer("❌ Неверный формат. Используй @username или ID.")
-            return
-
-    if borrower_id == user_id:
-        await message.answer("❌ Нельзя дать в долг самому себе.")
-        await state.clear()
-        return
-
-    await state.update_data(borrower_id=borrower_id)
-    await message.answer(f"💸 Введите сумму займа (мин. {format_money(LOAN_SETTINGS['min_amount'])}):")
-    await state.set_state(LoanStates.entering_amount)
-
-@dp.message(LoanStates.entering_amount)
-async def loan_enter_amount(message: Message, state: FSMContext):
-    try:
-        amount = int(message.text)
-        if amount < LOAN_SETTINGS["min_amount"]:
-            await message.answer(f"❌ Минимальная сумма: {format_money(LOAN_SETTINGS['min_amount'])}")
-            return
-        user = await get_user(message.from_user.id)
-        if amount > user['balance']:
-            await message.answer(f"❌ У вас недостаточно средств. Баланс: {format_money(user['balance'])}")
-            return
-        await state.update_data(amount=amount)
-        await message.answer(f"📅 Введите срок займа в днях (1-{LOAN_SETTINGS['max_duration_days']}):")
-        await state.set_state(LoanStates.entering_days)
-    except ValueError:
-        await message.answer("❌ Введите число.")
-
-@dp.message(LoanStates.entering_days)
-async def loan_enter_days(message: Message, state: FSMContext):
-    try:
-        days = int(message.text)
-        if days < 1 or days > LOAN_SETTINGS["max_duration_days"]:
-            await message.answer(f"❌ Срок должен быть от 1 до {LOAN_SETTINGS['max_duration_days']} дней.")
-            return
-
-        data = await state.get_data()
-        borrower_id = data['borrower_id']
-        amount = data['amount']
-        borrower = await get_user(borrower_id)
-
-        await state.update_data(days=days)
-        total_return = amount + int(amount * LOAN_SETTINGS['interest_rate'] * days)
-
-        confirm_text = (
-            f"📄 *ПОДТВЕРЖДЕНИЕ ЗАЙМА*\n\n"
-            f"👤 Заёмщик: {borrower['full_name']}\n"
-            f"💰 Сумма: {format_money(amount)}\n"
-            f"📅 Срок: {days} дн.\n"
-            f"📈 Процент: {int(LOAN_SETTINGS['interest_rate']*100)}% в день\n"
-            f"💎 К возврату: {format_money(total_return)}\n\n"
-            f"Подтверждаешь?"
-        )
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Подтвердить", callback_data="loan_confirm"),
-             InlineKeyboardButton(text="❌ Отмена", callback_data="loan_cancel")]
-        ])
-        await message.answer(confirm_text, parse_mode="Markdown", reply_markup=kb)
-        await state.set_state(LoanStates.confirming)
-    except ValueError:
-        await message.answer("❌ Введите число.")
-
-@dp.callback_query(F.data == "loan_confirm", LoanStates.confirming)
-async def loan_confirm(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    lender_id = callback.from_user.id
-    borrower_id = data['borrower_id']
-    amount = data['amount']
-    days = data['days']
-
-    success, msg, loan_id = await create_loan(lender_id, borrower_id, amount, days)
-    await callback.message.edit_text(msg)
-
-    if success:
-        try:
-            await bot.send_message(borrower_id,
-                f"💰 *Вам выдан займ!*\n\n"
-                f"👤 Кредитор: {callback.from_user.full_name}\n"
-                f"💰 Сумма: {format_money(amount)}\n"
-                f"📅 Срок: {days} дн.\n"
-                f"📈 Процент: {int(LOAN_SETTINGS['interest_rate']*100)}% в день\n"
-                f"🆔 ID займа: #{loan_id}\n\n"
-                f"Вернуть долг можно через меню долгов или командой /repay_{loan_id}"
-            )
-        except:
-            pass
-    await state.clear()
-
-@dp.callback_query(F.data == "loan_cancel", LoanStates.confirming)
-async def loan_cancel(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("❌ Займ отменён.")
-    await state.clear()
-
-# ----- ПРОСМОТР ЗАЙМОВ (КРЕДИТОР) -----
-@dp.callback_query(F.data == "loan_my_lender")
-async def loan_my_lender(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    loans = await get_user_loans(user_id, as_lender=True)
-
-    if not loans:
-        await callback.message.edit_text(
-            "📭 У тебя нет активных выданных займов.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="loan_back_to_menu")]
-            ])
-        )
-        await callback.answer()
-        return
-
-    text = "📤 *ТВОИ ВЫДАННЫЕ ЗАЙМЫ*\n\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-
-    for loan in loans:
-        borrower = await get_user(loan['borrower_id'])
-        due = safe_parse_datetime(loan['due_date'])
-        due_str = due.strftime('%d.%m.%Y') if due else 'неизвестно'
-        total = loan['amount'] + int(loan['amount'] * loan['interest'])
-
-        text += f"🔹 *Займ #{loan['id']}*\n"
-        text += f"👤 Заёмщик: {borrower['full_name']}\n"
-        text += f"💰 Сумма: {format_money(loan['amount'])}\n"
-        text += f"💎 К возврату: {format_money(total)}\n"
-        text += f"📅 Срок: до {due_str}\n\n"
-
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"📢 Вызвать коллектора #{loan['id']}", callback_data=f"loan_collector_{loan['id']}")
-        ])
-
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(text="🔙 Назад", callback_data="loan_back_to_menu")
-    ])
-
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
-    await callback.answer()
-
-# ----- ПРОСМОТР ДОЛГОВ (ЗАЁМЩИК) -----
-@dp.callback_query(F.data == "loan_my_borrower")
-async def loan_my_borrower(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    loans = await get_user_loans(user_id, as_borrower=True)
-
-    if not loans:
-        await callback.message.edit_text(
-            "📭 У тебя нет активных долгов.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="loan_back_to_menu")]
-            ])
-        )
-        await callback.answer()
-        return
-
-    text = "📥 *ТВОИ АКТИВНЫЕ ДОЛГИ*\n\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-
-    for loan in loans:
-        lender = await get_user(loan['lender_id'])
-        due = safe_parse_datetime(loan['due_date'])
-        due_str = due.strftime('%d.%m.%Y') if due else 'неизвестно'
-        days_left = (due - datetime.now()).days if due else 0
-        total = loan['amount'] + int(loan['amount'] * loan['interest'])
-
-        text += f"🔹 *Займ #{loan['id']}*\n"
-        text += f"👤 Кредитор: {lender['full_name']}\n"
-        text += f"💰 Сумма: {format_money(loan['amount'])}\n"
-        text += f"💎 К возврату: {format_money(total)}\n"
-        text += f"⏳ Осталось дней: {days_left}\n"
-        text += f"📅 Срок: до {due_str}\n\n"
-
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"💸 Вернуть долг #{loan['id']}", callback_data=f"loan_repay_{loan['id']}")
-        ])
-
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(text="🔙 Назад", callback_data="loan_back_to_menu")
-    ])
-
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
-    await callback.answer()
-
-# ----- КОЛЛЕКТОР -----
-@dp.callback_query(F.data.startswith("loan_collector_"))
-async def loan_collector_callback(callback: CallbackQuery):
-    loan_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
-
-    # Подтверждение
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, вызвать", callback_data=f"loan_collector_confirm_{loan_id}"),
-         InlineKeyboardButton(text="❌ Отмена", callback_data="loan_my_lender")]
-    ])
-    await callback.message.edit_text(
-        f"⚠️ *Вызов коллектора*\n\n"
-        f"Ты уверен? Услуга стоит {int(LOAN_SETTINGS['collector_fee']*100)}% от суммы займа.\n"
-        f"Коллектор попытается взыскать долг принудительно.",
-        parse_mode="Markdown",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("loan_collector_confirm_"))
-async def loan_collector_confirm(callback: CallbackQuery):
-    loan_id = int(callback.data.split("_")[3])
-    user_id = callback.from_user.id
-    success, msg = await call_collector(loan_id, user_id)
-    await callback.message.edit_text(msg)
-    await callback.answer()
-
-# ----- ВОЗВРАТ ДОЛГА -----
-@dp.callback_query(F.data.startswith("loan_repay_"))
-async def loan_repay_callback(callback: CallbackQuery):
-    loan_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
-
-    loan = await get_loan_by_id(loan_id)
-    if not loan:
-        await callback.answer("❌ Займ не найден.", show_alert=True)
-        return
-
-    total = loan['amount'] + int(loan['amount'] * loan['interest'])
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить возврат", callback_data=f"loan_repay_confirm_{loan_id}"),
-         InlineKeyboardButton(text="❌ Отмена", callback_data="loan_my_borrower")]
-    ])
-    await callback.message.edit_text(
-        f"💸 *ПОДТВЕРЖДЕНИЕ ВОЗВРАТА*\n\n"
-        f"Займ #{loan_id}\n"
-        f"Сумма к возврату: {format_money(total)}\n\n"
-        f"Подтверди операцию:",
-        parse_mode="Markdown",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("loan_repay_confirm_"))
-async def loan_repay_confirm(callback: CallbackQuery):
-    loan_id = int(callback.data.split("_")[3])
-    user_id = callback.from_user.id
-    success, msg = await repay_loan(loan_id, user_id)
-    await callback.message.edit_text(msg)
-    await callback.answer()
-
-# ----- ВОЗВРАТ ПО КОМАНДЕ /repay_123 -----
-@dp.message(lambda message: message.text and message.text.startswith('/repay_'))
-async def cmd_repay_loan(message: Message):
-    try:
-        loan_id = int(message.text.split('_')[1])
-        user_id = message.from_user.id
-        success, msg = await repay_loan(loan_id, user_id)
-        await message.answer(msg)
-    except (IndexError, ValueError):
-        await message.answer("❌ Неверный формат. Используй /repay_123")
-    except Exception as e:
-        logger.error(f"Ошибка в repay_loan: {e}")
-        await message.answer("❌ Произошла ошибка при возврате долга.")
-
-# ----- НАЗАД В МЕНЮ ДОЛГОВ -----
-@dp.callback_query(F.data == "loan_back_to_menu")
-async def loan_back_to_menu(callback: CallbackQuery):
-    await cmd_loans_menu(callback.message)
-    await callback.answer()
-
-# ==================== ТОП НЕДЕЛИ ====================
-@dp.message(Command("top"))
-async def cmd_weekly_top(message: Message):
-    top = await get_weekly_top()
-    if not top:
-        await message.answer("🏆 За эту неделю пока нет статистики.")
-        return
-    text = "🏆 *ТОП ЗАРАБОТКА ЗА НЕДЕЛЮ*\n\n"
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    for i, entry in enumerate(top):
-        name = entry['full_name'][:15] + "..." if len(entry['full_name']) > 15 else entry['full_name']
-        text += f"{medals[i]} {name} — {format_money(entry['earnings'])}\n"
-        if i == 9: break
-    await message.answer(text, parse_mode="Markdown")
 
 # ==================== ПЕРЕВОДЫ ====================
 @dp.message(F.text == "🔁 Перевод")
@@ -3370,7 +2579,6 @@ async def handle_admin_bonus_amount(message: Message, state: FSMContext):
             await state.clear()
             return
         await update_balance(user_id, amount, "bonus", f"🎁 Бонус от администратора")
-        await update_weekly_earnings(user_id, amount)
         user_updated = await get_user(user_id)
         await message.answer(
             f"✅ *Бонус выдан!*\n\n"
@@ -4031,59 +3239,6 @@ async def penalty_scheduler():
             logger.error(f"Ошибка в планировщике штрафов: {e}")
             await asyncio.sleep(300)
 
-async def business_notification_scheduler():
-    while True:
-        try:
-            await asyncio.sleep(60)
-            now = datetime.now()
-            one_hour_ago = now - timedelta(hours=1)
-            async with aiosqlite.connect(DB_NAME) as db:
-                db.row_factory = aiosqlite.Row
-                cursor = await db.execute('''
-                    SELECT DISTINCT owner_id 
-                    FROM businesses 
-                    WHERE collect_cooldown IS NOT NULL 
-                      AND collect_cooldown <= ? 
-                      AND is_active = 1
-                ''', (one_hour_ago.isoformat(),))
-                rows = await cursor.fetchall()
-            for row in rows:
-                user_id = row['owner_id']
-                now_ts = now.timestamp()
-                last_notify = last_business_notification.get(user_id, 0)
-                if now_ts - last_notify < BUSINESS_NOTIFICATION_COOLDOWN:
-                    continue
-                status = await get_business_collect_status(user_id)
-                if status['can_collect'] and status['total_income'] > 0:
-                    try:
-                        await bot.send_message(
-                            user_id,
-                            f"🏢 *ВАШ БИЗНЕС ПРИНЁС ПРИБЫЛЬ!*\n\n"
-                            f"💰 Доступно к сбору: {format_money(status['total_income'])}\n"
-                            f"💵 Пассивный доход: {format_money(status['total_per_hour'])}/час\n\n"
-                            f"👇 Заберите деньги прямо сейчас:",
-                            parse_mode="Markdown",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="💰 Забрать доход", callback_data="biz_collect")]
-                            ])
-                        )
-                        last_business_notification[user_id] = now_ts
-                        logger.info(f"📨 Уведомление о бизнесе отправлено пользователю {user_id}")
-                    except Exception as e:
-                        logger.error(f"Не удалось отправить уведомление {user_id}: {e}")
-        except Exception as e:
-            logger.error(f"Ошибка в планировщике уведомлений о бизнесе: {e}")
-            await asyncio.sleep(300)
-
-async def weekly_top_scheduler():
-    while True:
-        now = datetime.now()
-        next_run = now + timedelta(days=(7 - now.weekday()) % 7)
-        next_run = next_run.replace(hour=0, minute=5, second=0, microsecond=0)
-        wait_seconds = (next_run - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
-        await reward_weekly_top()
-
 # ==================== КОМАНДЫ АДМИНИСТРАТОРА ====================
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
@@ -4131,7 +3286,6 @@ async def cmd_bonus(message: Message):
             await message.answer("❌ Пользователь не найден")
             return
         await update_balance(user_id, amount, "bonus", "Бонус от администратора (команда)")
-        await update_weekly_earnings(user_id, amount)
         await message.answer(f"✅ Бонус {format_money(amount)} выдан пользователю {user['full_name']}")
     except ValueError:
         await message.answer("❌ Неверный формат ID или суммы")
@@ -4156,6 +3310,62 @@ async def cmd_fine(message: Message):
     except ValueError:
         await message.answer("❌ Неверный формат ID или суммы")
 
+async def business_notification_scheduler():
+    """Планировщик уведомлений о готовом доходе с бизнесов."""
+    while True:
+        try:
+            await asyncio.sleep(60)  # проверяем раз в минуту
+
+            now = datetime.now()
+            one_hour_ago = now - timedelta(hours=1)
+
+            async with aiosqlite.connect(DB_NAME) as db:
+                db.row_factory = aiosqlite.Row
+                # Ищем все бизнесы, у которых collect_cooldown < 1 час назад
+                # то есть уже можно собрать доход, но возможно ещё не собрали
+                cursor = await db.execute('''
+                    SELECT DISTINCT owner_id 
+                    FROM businesses 
+                    WHERE collect_cooldown IS NOT NULL 
+                      AND collect_cooldown <= ? 
+                      AND is_active = 1
+                ''', (one_hour_ago.isoformat(),))
+                rows = await cursor.fetchall()
+
+            for row in rows:
+                user_id = row['owner_id']
+                now_ts = now.timestamp()
+
+                # Проверяем, не отправляли ли уведомление недавно
+                last_notify = last_business_notification.get(user_id, 0)
+                if now_ts - last_notify < BUSINESS_NOTIFICATION_COOLDOWN:
+                    continue
+
+                # Убедимся, что у пользователя действительно есть бизнесы с готовым доходом
+                status = await get_business_collect_status(user_id)
+                if status['can_collect'] and status['total_income'] > 0:
+                    try:
+                        # Отправляем личное сообщение
+                        await bot.send_message(
+                            user_id,
+                            f"🏢 *ВАШ БИЗНЕС ПРИНЁС ПРИБЫЛЬ!*\n\n"
+                            f"💰 Доступно к сбору: {format_money(status['total_income'])}\n"
+                            f"💵 Пассивный доход: {format_money(status['total_per_hour'])}/час\n\n"
+                            f"👇 Заберите деньги прямо сейчас:",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="💰 Забрать доход", callback_data="biz_collect")]
+                            ])
+                        )
+                        last_business_notification[user_id] = now_ts
+                        logger.info(f"📨 Уведомление о бизнесе отправлено пользователю {user_id}")
+                    except Exception as e:
+                        logger.error(f"Не удалось отправить уведомление {user_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Ошибка в планировщике уведомлений о бизнесе: {e}")
+            await asyncio.sleep(300)  # при ошибке ждём 5 минут
+
 # ==================== ЗАПУСК БОТА ====================
 async def on_startup():
     await init_db()
@@ -4166,9 +3376,8 @@ async def on_startup():
     else:
         logger.info(f"✅ Username бота: @{bot_info.username}")
     asyncio.create_task(penalty_scheduler())
-    asyncio.create_task(business_notification_scheduler())
-    asyncio.create_task(weekly_top_scheduler())
-    logger.info("✅ Бот запущен! ДОЛГИ + ИНВЕНТАРЬ + ТОП НЕДЕЛИ АКТИВИРОВАНЫ.")
+        asyncio.create_task(business_notification_scheduler())
+    logger.info("✅ Бот запущен! БИЗНЕС-СИСТЕМА С ТАЙМЕРОМ АКТИВИРОВАНА.")
 
 async def on_shutdown():
     logger.info("🛑 Бот останавливается...")
