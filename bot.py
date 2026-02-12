@@ -3376,7 +3376,7 @@ async def on_startup():
     else:
         logger.info(f"✅ Username бота: @{bot_info.username}")
     asyncio.create_task(penalty_scheduler())
-        asyncio.create_task(business_notification_scheduler())
+    asyncio.create_task(business_notification_scheduler())
     logger.info("✅ Бот запущен! БИЗНЕС-СИСТЕМА С ТАЙМЕРОМ АКТИВИРОВАНА.")
 
 async def on_shutdown():
