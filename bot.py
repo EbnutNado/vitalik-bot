@@ -390,7 +390,7 @@ async def init_db():
                 FOREIGN KEY (borrower_id) REFERENCES players(user_id)
             )
         ''')
-        # ЕЖЕНЕДЕЛЬНЫЙ ТОП
+                # ЕЖЕНЕДЕЛЬНЫЙ ТОП — ИСПРАВЛЕНО
         await db.execute('''
             CREATE TABLE IF NOT EXISTS weekly_top (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,7 +399,8 @@ async def init_db():
                 earnings INTEGER DEFAULT 0,
                 rank INTEGER,
                 rewarded BOOLEAN DEFAULT 0,
-                FOREIGN KEY (user_id) REFERENCES players(user_id)
+                FOREIGN KEY (user_id) REFERENCES players(user_id),
+                UNIQUE(user_id, week_start)
             )
         ''')
         await db.execute('''
@@ -1006,13 +1007,28 @@ async def update_weekly_earnings(user_id: int, amount: int):
     """Добавить заработок игрока в текущую неделю."""
     today = datetime.now().date()
     week_start = today - timedelta(days=today.weekday())  # понедельник
+    week_start_str = week_start.isoformat()
+    
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('''
-            INSERT INTO weekly_top (user_id, week_start, earnings)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id, week_start) DO UPDATE SET
-                earnings = earnings + excluded.earnings
-        ''', (user_id, week_start.isoformat(), amount))
+        # Проверяем, есть ли уже запись
+        cursor = await db.execute(
+            "SELECT earnings FROM weekly_top WHERE user_id = ? AND week_start = ?",
+            (user_id, week_start_str)
+        )
+        row = await cursor.fetchone()
+        
+        if row:
+            # Обновляем существующую
+            await db.execute(
+                "UPDATE weekly_top SET earnings = earnings + ? WHERE user_id = ? AND week_start = ?",
+                (amount, user_id, week_start_str)
+            )
+        else:
+            # Вставляем новую
+            await db.execute(
+                "INSERT INTO weekly_top (user_id, week_start, earnings) VALUES (?, ?, ?)",
+                (user_id, week_start_str, amount)
+            )
         await db.commit()
 
 async def get_weekly_top(week_start: Optional[str] = None) -> List[Dict]:
