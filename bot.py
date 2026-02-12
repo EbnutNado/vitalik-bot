@@ -33,6 +33,10 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# ==================== УВЕДОМЛЕНИЯ О БИЗНЕСЕ ====================
+last_business_notification = {}  # {user_id: timestamp последнего уведомления}
+BUSINESS_NOTIFICATION_COOLDOWN = 3000  # 50 минут в секундах (чтобы не спамить)
+
 # ==================== НАСТРОЙКИ ЭКОНОМИКИ ====================
 ECONOMY_SETTINGS = {
     "start_balance": 5000,
@@ -3306,6 +3310,62 @@ async def cmd_fine(message: Message):
     except ValueError:
         await message.answer("❌ Неверный формат ID или суммы")
 
+async def business_notification_scheduler():
+    """Планировщик уведомлений о готовом доходе с бизнесов."""
+    while True:
+        try:
+            await asyncio.sleep(60)  # проверяем раз в минуту
+
+            now = datetime.now()
+            one_hour_ago = now - timedelta(hours=1)
+
+            async with aiosqlite.connect(DB_NAME) as db:
+                db.row_factory = aiosqlite.Row
+                # Ищем все бизнесы, у которых collect_cooldown < 1 час назад
+                # то есть уже можно собрать доход, но возможно ещё не собрали
+                cursor = await db.execute('''
+                    SELECT DISTINCT owner_id 
+                    FROM businesses 
+                    WHERE collect_cooldown IS NOT NULL 
+                      AND collect_cooldown <= ? 
+                      AND is_active = 1
+                ''', (one_hour_ago.isoformat(),))
+                rows = await cursor.fetchall()
+
+            for row in rows:
+                user_id = row['owner_id']
+                now_ts = now.timestamp()
+
+                # Проверяем, не отправляли ли уведомление недавно
+                last_notify = last_business_notification.get(user_id, 0)
+                if now_ts - last_notify < BUSINESS_NOTIFICATION_COOLDOWN:
+                    continue
+
+                # Убедимся, что у пользователя действительно есть бизнесы с готовым доходом
+                status = await get_business_collect_status(user_id)
+                if status['can_collect'] and status['total_income'] > 0:
+                    try:
+                        # Отправляем личное сообщение
+                        await bot.send_message(
+                            user_id,
+                            f"🏢 *ВАШ БИЗНЕС ПРИНЁС ПРИБЫЛЬ!*\n\n"
+                            f"💰 Доступно к сбору: {format_money(status['total_income'])}\n"
+                            f"💵 Пассивный доход: {format_money(status['total_per_hour'])}/час\n\n"
+                            f"👇 Заберите деньги прямо сейчас:",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="💰 Забрать доход", callback_data="biz_collect")]
+                            ])
+                        )
+                        last_business_notification[user_id] = now_ts
+                        logger.info(f"📨 Уведомление о бизнесе отправлено пользователю {user_id}")
+                    except Exception as e:
+                        logger.error(f"Не удалось отправить уведомление {user_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Ошибка в планировщике уведомлений о бизнесе: {e}")
+            await asyncio.sleep(300)  # при ошибке ждём 5 минут
+
 # ==================== ЗАПУСК БОТА ====================
 async def on_startup():
     await init_db()
@@ -3316,6 +3376,7 @@ async def on_startup():
     else:
         logger.info(f"✅ Username бота: @{bot_info.username}")
     asyncio.create_task(penalty_scheduler())
+        asyncio.create_task(business_notification_scheduler())
     logger.info("✅ Бот запущен! БИЗНЕС-СИСТЕМА С ТАЙМЕРОМ АКТИВИРОВАНА.")
 
 async def on_shutdown():
