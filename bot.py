@@ -392,6 +392,7 @@ async def init_db():
             )
         ''')
                 # ЕЖЕНЕДЕЛЬНЫЙ ТОП — ИСПРАВЛЕНО
+                # ========== ЕЖЕНЕДЕЛЬНЫЙ ТОП ==========
         await db.execute('''
             CREATE TABLE IF NOT EXISTS weekly_top (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -954,6 +955,7 @@ async def repay_loan(loan_id: int, user_id: int) -> tuple[bool, str]:
     return True, f"✅ Долг погашен. Кредитор получил {format_money(total)}."
 
 async def call_collector(loan_id: int, user_id: int) -> tuple[bool, str]:
+    """Вызвать коллектора (кредитор или админ). Долг закрывается принудительно."""
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute('''
@@ -963,30 +965,46 @@ async def call_collector(loan_id: int, user_id: int) -> tuple[bool, str]:
         if not loan:
             return False, "❌ Займ не найден или уже погашен."
         loan = dict(loan)
+
         if loan['lender_id'] != user_id and user_id != ADMIN_ID:
             return False, "❌ Только кредитор или админ могут вызвать коллектора."
         if loan['collector_used']:
             return False, "❌ Коллектор уже был вызван."
+
+        # Оплата услуг коллектора
         fee = int(loan['amount'] * LOAN_SETTINGS["collector_fee"])
         lender = await get_user(loan['lender_id'])
         if lender['balance'] < fee:
             return False, f"❌ У кредитора недостаточно средств для оплаты коллектора ({format_money(fee)})."
+
         await update_balance(loan['lender_id'], -fee, "collector_fee", f"Оплата коллектора за займ #{loan_id}")
+
+        # Взыскание долга
         total = loan['amount'] + int(loan['amount'] * loan['interest'])
         borrower = await get_user(loan['borrower_id'])
         if borrower['balance'] >= total:
             await update_balance(loan['borrower_id'], -total, "collector_debit", f"Принудительное взыскание долга #{loan_id}")
             await update_balance(loan['lender_id'], total, "collector_payout", f"Взыскано коллектором по займу #{loan_id}")
+            payout_message = f"💰 Полностью взыскано {format_money(total)}."
         else:
+            # Частичное взыскание
             if borrower['balance'] > 0:
                 await update_balance(loan['borrower_id'], -borrower['balance'], "collector_debit", f"Частичное взыскание долга #{loan_id}")
                 await update_balance(loan['lender_id'], borrower['balance'], "collector_payout", f"Частично взыскано коллектором #{loan_id}")
+                payout_message = f"⚠️ Частично взыскано {format_money(borrower['balance'])}."
+            else:
+                payout_message = "😔 У должника нет денег для взыскания."
+
+            # Штраф за невыплату
             await update_balance(loan['borrower_id'], -1000, "penalty", "Штраф за невыплату долга (коллектор)")
+
+        # Помечаем долг как погашенный (коллектор выполнил работу)
         await db.execute('''
-            UPDATE loans SET collector_used = 1 WHERE id = ?
-        ''', (loan_id,))
+            UPDATE loans SET repaid = 1, repaid_at = ?, collector_used = 1 WHERE id = ?
+        ''', (datetime.now().isoformat(), loan_id))
         await db.commit()
-    return True, "✅ Коллектор отработал. Деньги (частично) взысканы."
+
+    return True, f"✅ Коллектор отработал. {payout_message} Долг закрыт."
 
 async def get_user_loans(user_id: int, as_lender: bool = False, as_borrower: bool = False) -> List[Dict]:
     async with aiosqlite.connect(DB_NAME) as db:
@@ -1017,25 +1035,21 @@ async def get_loan_by_id(loan_id: int) -> Optional[Dict]:
 async def update_weekly_earnings(user_id: int, amount: int):
     """Добавить заработок игрока в текущую неделю."""
     today = datetime.now().date()
-    week_start = today - timedelta(days=today.weekday())  # понедельник
+    week_start = today - timedelta(days=today.weekday())
     week_start_str = week_start.isoformat()
-    
+
     async with aiosqlite.connect(DB_NAME) as db:
-        # Проверяем, есть ли уже запись
         cursor = await db.execute(
             "SELECT earnings FROM weekly_top WHERE user_id = ? AND week_start = ?",
             (user_id, week_start_str)
         )
         row = await cursor.fetchone()
-        
         if row:
-            # Обновляем существующую
             await db.execute(
                 "UPDATE weekly_top SET earnings = earnings + ? WHERE user_id = ? AND week_start = ?",
                 (amount, user_id, week_start_str)
             )
         else:
-            # Вставляем новую
             await db.execute(
                 "INSERT INTO weekly_top (user_id, week_start, earnings) VALUES (?, ?, ?)",
                 (user_id, week_start_str, amount)
@@ -1060,16 +1074,24 @@ async def get_weekly_top(week_start: Optional[str] = None) -> List[Dict]:
         return [dict(row) for row in rows]
 
 async def reward_weekly_top():
+    """Выдать награды за прошлую неделю (вызывается по расписанию)."""
     today = datetime.now().date()
+    # Предыдущая неделя: понедельник прошлой недели
     last_week_start = (today - timedelta(days=today.weekday() + 7)).isoformat()
+
     top = await get_weekly_top(last_week_start)
     rewards = [50000, 30000, 20000, 15000, 10000, 8000, 6000, 4000, 2000, 1000]
+
     for idx, entry in enumerate(top):
         rank = idx + 1
         if rank <= 10:
             prize = rewards[rank-1]
             user_id = entry['user_id']
+            # Проверяем, не выдавали ли уже награду
+            if entry.get('rewarded'):
+                continue
             await update_balance(user_id, prize, "weekly_top", f"Награда за {rank} место в топе недели")
+            # Отметить как награждённого
             async with aiosqlite.connect(DB_NAME) as db:
                 await db.execute('''
                     UPDATE weekly_top SET rank = ?, rewarded = 1 WHERE user_id = ? AND week_start = ?
@@ -2998,15 +3020,18 @@ async def loan_repay_confirm(callback: CallbackQuery):
     await callback.answer()
 
 # ----- ВОЗВРАТ ПО КОМАНДЕ /repay_123 -----
-@dp.message(Command(re.compile(r"repay_\d+")))
+@dp.message(lambda message: message.text and message.text.startswith('/repay_'))
 async def cmd_repay_loan(message: Message):
     try:
         loan_id = int(message.text.split('_')[1])
         user_id = message.from_user.id
         success, msg = await repay_loan(loan_id, user_id)
         await message.answer(msg)
-    except:
+    except (IndexError, ValueError):
         await message.answer("❌ Неверный формат. Используй /repay_123")
+    except Exception as e:
+        logger.error(f"Ошибка в repay_loan: {e}")
+        await message.answer("❌ Произошла ошибка при возврате долга.")
 
 # ----- НАЗАД В МЕНЮ ДОЛГОВ -----
 @dp.callback_query(F.data == "loan_back_to_menu")
