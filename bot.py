@@ -2,14 +2,12 @@
 Telegram бот "Виталик Штрафующий"
 ✅ Чеки исправлены | ✅ Дуэль без ухода в минус | ✅ Нагирт ужесточён
 ✅ БИЗНЕС-СИСТЕМА: таймер сбора, сумма дохода, кулдаун 1 час
-✅ MINI APP: поддержка веб-приложения
 """
 
 import asyncio
 import logging
 import random
 import string
-import json  # NEW
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Union
 
@@ -17,7 +15,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo  # NEW
+    InlineKeyboardMarkup, InlineKeyboardButton
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -28,9 +26,6 @@ import aiosqlite
 BOT_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"  # ЗАМЕНИ НА СВОЙ!
 ADMIN_ID = 5775839902  # ЗАМЕНИ НА СВОЙ ID
 
-# URL вашего Mini App (после публикации)
-MINI_APP_URL = "https://ebnutnado.github.io/vitalik-miniappp/"  # ЗАМЕНИТЕ!
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -40,7 +35,7 @@ dp = Dispatcher(storage=storage)
 
 # ==================== УВЕДОМЛЕНИЯ О БИЗНЕСЕ ====================
 last_business_notification = {}  # {user_id: timestamp последнего уведомления}
-BUSINESS_NOTIFICATION_COOLDOWN = 3000  # 50 минут в секундах
+BUSINESS_NOTIFICATION_COOLDOWN = 3000  # 50 минут в секундах (чтобы не спамить)
 
 # ==================== НАСТРОЙКИ ЭКОНОМИКИ ====================
 ECONOMY_SETTINGS = {
@@ -1042,86 +1037,7 @@ async def deactivate_check(check_id: str):
             UPDATE gift_checks SET is_active = 0 WHERE check_id = ?
         ''', (check_id,))
         await db.commit()
-
-# ==================== НОВАЯ ФУНКЦИЯ ДЛЯ ЗАРПЛАТЫ (ВЫНЕСЕНА) ====================
-async def process_salary(user_id: int) -> str:
-    """Логика получения зарплаты, возвращает текст ответа"""
-    user = await get_user(user_id)
-    if not user:
-        return "❌ Пользователь не найден"
-
-    current_time = datetime.now()
-    last_salary = user.get('last_salary')
-    if last_salary:
-        last_salary_time = safe_parse_datetime(last_salary)
-        if last_salary_time:
-            time_since_last = current_time - last_salary_time
-            min_wait = timedelta(seconds=ECONOMY_SETTINGS["salary_interval"])
-            if time_since_last < min_wait:
-                wait_seconds = int((min_wait - time_since_last).total_seconds())
-                wait_time = format_time(wait_seconds)
-                return f"⏳ *Слишком рано!*\n\nЖди еще *{wait_time}* (мм:сс)"
-
-    await cleanup_expired()
-    boost_multiplier = await get_active_boosts(user_id)
-    nagirt_effects = await get_active_nagirt_effects(user_id)
-    biz_bonuses = await get_total_business_bonuses(user_id)
-    salary_bonus = biz_bonuses["salary"]
-
-    base_salary = random.randint(ECONOMY_SETTINGS["salary_min"], ECONOMY_SETTINGS["salary_max"])
-
-    pill_fine = 0
-    if nagirt_effects["has_active"]:
-        actual_fine_chance = ECONOMY_SETTINGS["fine_chance"] + nagirt_effects.get("fine_chance_mod", 0)
-        if random.random() <= actual_fine_chance:
-            pill_fine = random.randint(int(base_salary * 0.3), int(base_salary * 0.6))
-            fine_reasons = [
-                "Обнаружены следы Нагирта в крови!",
-                "Работа в состоянии измененного сознания!",
-                "Нарушение техники безопасности из-за таблеток!",
-                "Неконтролируемая агрессия под Нагиртом!",
-                "Прогул после приёма Нагирта!"
-            ]
-            await update_balance(user_id, -pill_fine, "penalty", f"💊 {random.choice(fine_reasons)}")
-
-    total_multiplier = 1.0 + boost_multiplier + nagirt_effects["salary_boost"] + salary_bonus
-    final_salary = int(base_salary * total_multiplier)
-    await update_balance(user_id, final_salary, "salary", f"💸 Зарплата (x{total_multiplier:.2f})")
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE players SET last_salary = ? WHERE user_id = ?", (current_time.isoformat(), user_id))
-        await db.commit()
-
-    user = await get_user(user_id)
-    response = f"💸 *ЗАРПЛАТА НАЧИСЛЕНА!*\n\n"
-    response += f"📊 *Детализация:*\n"
-    response += f"• Базовая ставка: {format_money(base_salary)}\n"
-    details = []
-    if boost_multiplier > 0:
-        details.append(f"Бусты: +{int(boost_multiplier*100)}%")
-    if nagirt_effects["salary_boost"] > 0:
-        details.append(f"Нагирт: +{int(nagirt_effects['salary_boost']*100)}%")
-    if salary_bonus > 0:
-        details.append(f"Бизнес: +{int(salary_bonus*100)}%")
-    if details:
-        response += f"• Доплаты: {', '.join(details)}\n"
-    response += f"• Итоговый коэффициент: x{total_multiplier:.2f}\n\n"
-    if pill_fine > 0:
-        response += f"⚠️ *ШТРАФ ЗА НАГИРТ:* -{format_money(pill_fine)}\n\n"
-    response += f"✅ *Итого начислено:* {format_money(final_salary)}\n"
-    response += f"💳 *Новый баланс:* {format_money(user['balance'])}\n\n"
-    comments = [
-        "Могло бы быть и больше...", "На такую сумму даже пиццу не купишь!", "Работай лучше!",
-        "Отличная работа!", "Так держать!", "Вы заслужили эту премию!",
-        "Нормально работаешь.", "Продолжай в том же духе.", "Стабильно, но можно лучше."
-    ]
-    if nagirt_effects["has_active"]:
-        pill_comments = ["Таблетки не заменят профессионализм!", "Осторожнее с Нагиртом!", "Лекарства должны помогать, а не мешать работе!", "Вы думаете, Нагирт делает из вас супермена?"]
-        response += f"💬 *Виталик:* '{random.choice(pill_comments)}'"
-    else:
-        response += f"💬 *Виталик:* '{random.choice(comments)}'"
-    return response
-
-# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
+        # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     args = message.text.split()
@@ -1233,56 +1149,84 @@ async def handle_check_activation(message: Message, check_id: str):
     )
     await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
-# ----- ЗАРПЛАТА (используем новую функцию) -----
+# ----- ЗАРПЛАТА -----
 @dp.message(F.text == "💰 Получка")
 async def handle_paycheck(message: Message):
-    result = await process_salary(message.from_user.id)
-    await message.answer(result, parse_mode="Markdown")
-
-# ==================== MINI APP ====================
-@dp.message(Command("app"))
-async def cmd_app(message: Message):
     user_id = message.from_user.id
     user = await get_user(user_id)
     if not user:
         await message.answer("Сначала зарегистрируйтесь через /start")
         return
+    current_time = datetime.now()
+    last_salary = user.get('last_salary')
+    if last_salary:
+        last_salary_time = safe_parse_datetime(last_salary)
+        if last_salary_time:
+            time_since_last = current_time - last_salary_time
+            min_wait = timedelta(seconds=ECONOMY_SETTINGS["salary_interval"])
+            if time_since_last < min_wait:
+                wait_seconds = int((min_wait - time_since_last).total_seconds())
+                wait_time = format_time(wait_seconds)
+                await message.answer(f"⏳ *Слишком рано!*\n\nЖди еще *{wait_time}* (мм:сс)")
+                return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Открыть Mini App", web_app=WebAppInfo(url=MINI_APP_URL))]
-    ])
-    await message.answer("Нажмите кнопку, чтобы открыть интерфейс:", reply_markup=keyboard)
+    await cleanup_expired()
+    boost_multiplier = await get_active_boosts(user_id)
+    nagirt_effects = await get_active_nagirt_effects(user_id)
+    biz_bonuses = await get_total_business_bonuses(user_id)
+    salary_bonus = biz_bonuses["salary"]
 
-@dp.message(F.web_app_data)
-async def handle_web_app_data(message: Message):
-    user_id = message.from_user.id
-    try:
-        data = json.loads(message.web_app_data.data)
-        action = data.get('action')
-        logger.info(f"Mini App action from {user_id}: {action}")
+    base_salary = random.randint(ECONOMY_SETTINGS["salary_min"], ECONOMY_SETTINGS["salary_max"])
 
-        if action == 'get_balance':
-            user = await get_user(user_id)
-            await message.answer(f"💰 Ваш баланс: {format_money(user['balance'])}")
+    pill_fine = 0
+    if nagirt_effects["has_active"]:
+        actual_fine_chance = ECONOMY_SETTINGS["fine_chance"] + nagirt_effects.get("fine_chance_mod", 0)
+        if random.random() <= actual_fine_chance:
+            pill_fine = random.randint(int(base_salary * 0.3), int(base_salary * 0.6))
+            fine_reasons = [
+                "Обнаружены следы Нагирта в крови!",
+                "Работа в состоянии измененного сознания!",
+                "Нарушение техники безопасности из-за таблеток!",
+                "Неконтролируемая агрессия под Нагиртом!",
+                "Прогул после приёма Нагирта!"
+            ]
+            await update_balance(user_id, -pill_fine, "penalty", f"💊 {random.choice(fine_reasons)}")
 
-        elif action == 'collect_salary':
-            result = await process_salary(user_id)
-            await message.answer(result, parse_mode="Markdown")
-
-        elif action == 'open_shop':
-            # Используем существующий хендлер магазина
-            await handle_shop(message)
-
-        elif action == 'open_business':
-            # Используем существующий хендлер бизнеса
-            await cmd_business_menu(message)
-
-        else:
-            await message.answer(f"Неизвестное действие: {action}")
-
-    except Exception as e:
-        logger.error(f"Ошибка обработки web_app_data: {e}")
-        await message.answer("❌ Произошла ошибка при обработке запроса.")
+    total_multiplier = 1.0 + boost_multiplier + nagirt_effects["salary_boost"] + salary_bonus
+    final_salary = int(base_salary * total_multiplier)
+    await update_balance(user_id, final_salary, "salary", f"💸 Зарплата (x{total_multiplier:.2f})")
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE players SET last_salary = ? WHERE user_id = ?", (current_time.isoformat(), user_id))
+        await db.commit()
+    user = await get_user(user_id)
+    response = f"💸 *ЗАРПЛАТА НАЧИСЛЕНА!*\n\n"
+    response += f"📊 *Детализация:*\n"
+    response += f"• Базовая ставка: {format_money(base_salary)}\n"
+    details = []
+    if boost_multiplier > 0:
+        details.append(f"Бусты: +{int(boost_multiplier*100)}%")
+    if nagirt_effects["salary_boost"] > 0:
+        details.append(f"Нагирт: +{int(nagirt_effects['salary_boost']*100)}%")
+    if salary_bonus > 0:
+        details.append(f"Бизнес: +{int(salary_bonus*100)}%")
+    if details:
+        response += f"• Доплаты: {', '.join(details)}\n"
+    response += f"• Итоговый коэффициент: x{total_multiplier:.2f}\n\n"
+    if pill_fine > 0:
+        response += f"⚠️ *ШТРАФ ЗА НАГИРТ:* -{format_money(pill_fine)}\n\n"
+    response += f"✅ *Итого начислено:* {format_money(final_salary)}\n"
+    response += f"💳 *Новый баланс:* {format_money(user['balance'])}\n\n"
+    comments = [
+        "Могло бы быть и больше...", "На такую сумму даже пиццу не купишь!", "Работай лучше!",
+        "Отличная работа!", "Так держать!", "Вы заслужили эту премию!",
+        "Нормально работаешь.", "Продолжай в том же духе.", "Стабильно, но можно лучше."
+    ]
+    if nagirt_effects["has_active"]:
+        pill_comments = ["Таблетки не заменят профессионализм!", "Осторожнее с Нагиртом!", "Лекарства должны помогать, а не мешать работе!", "Вы думаете, Нагирт делает из вас супермена?"]
+        response += f"💬 *Виталик:* '{random.choice(pill_comments)}'"
+    else:
+        response += f"💬 *Виталик:* '{random.choice(comments)}'"
+    await message.answer(response, parse_mode="Markdown")
 
 # ----- МАГАЗИН -----
 @dp.message(F.text == "🛒 Магазин")
@@ -1422,7 +1366,7 @@ async def handle_minigames(message: Message):
         f"• Штраф за брак: {format_money(ECONOMY_SETTINGS['asphalt_fine_min'])}-{format_money(ECONOMY_SETTINGS['asphalt_fine_max'])}\n"
         f"• Шанс успеха: 70% (с Нагиртом до 95%)\n"
         f"• Время работы: 30 секунд\n\n"
-        "⚔️ *Дуэль*\n"
+                "⚔️ *Дуэль*\n"
         f"• Ставка: от {format_money(ECONOMY_SETTINGS['duel_min_bet'])} до {format_money(ECONOMY_SETTINGS['duel_max_bet'])}\n"
         f"• Правила: вызов → ставка → бросок кубика по очереди\n"
         f"• Таймаут: {DUEL_TIMEOUT} сек на ход\n"
@@ -3377,6 +3321,8 @@ async def business_notification_scheduler():
 
             async with aiosqlite.connect(DB_NAME) as db:
                 db.row_factory = aiosqlite.Row
+                # Ищем все бизнесы, у которых collect_cooldown < 1 час назад
+                # то есть уже можно собрать доход, но возможно ещё не собрали
                 cursor = await db.execute('''
                     SELECT DISTINCT owner_id 
                     FROM businesses 
@@ -3390,13 +3336,16 @@ async def business_notification_scheduler():
                 user_id = row['owner_id']
                 now_ts = now.timestamp()
 
+                # Проверяем, не отправляли ли уведомление недавно
                 last_notify = last_business_notification.get(user_id, 0)
                 if now_ts - last_notify < BUSINESS_NOTIFICATION_COOLDOWN:
                     continue
 
+                # Убедимся, что у пользователя действительно есть бизнесы с готовым доходом
                 status = await get_business_collect_status(user_id)
                 if status['can_collect'] and status['total_income'] > 0:
                     try:
+                        # Отправляем личное сообщение
                         await bot.send_message(
                             user_id,
                             f"🏢 *ВАШ БИЗНЕС ПРИНЁС ПРИБЫЛЬ!*\n\n"
@@ -3415,7 +3364,7 @@ async def business_notification_scheduler():
 
         except Exception as e:
             logger.error(f"Ошибка в планировщике уведомлений о бизнесе: {e}")
-            await asyncio.sleep(300)
+            await asyncio.sleep(300)  # при ошибке ждём 5 минут
 
 # ==================== ЗАПУСК БОТА ====================
 async def on_startup():
