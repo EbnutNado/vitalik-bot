@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 # ======== ТВОИ ДАННЫЕ ========
 TELEGRAM_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
 FOLDER_ID = "b1ggcn6gnmknss2qm13j"  # из шага 1
-API_KEY = "ajel4lmkbhl6b7o83ik5"      # из шага 3
+API_KEY = "AQVNxnq1d97ei8asrSCgEdGN92cXym_faQZ8I3dp"      # из шага 3
 # ==============================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
