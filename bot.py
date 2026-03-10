@@ -1,38 +1,116 @@
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import requests
 import json
 import time
-from datetime import datetime
 import logging
+import re
+from datetime import datetime
+
+# ======== НАСТРОЙКИ ========
+TELEGRAM_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
+FOLDER_ID = "b1g0s9bjamjqrvas5pqr"  # из шага 1
+API_KEY = "AQVNxnq1d97ei8asrSCgEdGN92cXym_faQZ8I3dp"      # из шага 3
+# ============================
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# ======== ТВОИ ДАННЫЕ ========
-TELEGRAM_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
-FOLDER_ID = "b1g0s9bjamjqrvas5pqr"  # из шага 1
-API_KEY = "AQVNxnq1d97ei8asrSCgEdGN92cXym_faQZ8I3dp"      # из шага 3
-# ==============================
-
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot.set_my_commands([
+    telebot.types.BotCommand("/start", "🚀 Запустить бота"),
+    telebot.types.BotCommand("/help", "📖 Помощь"),
+    telebot.types.BotCommand("/subjects", "📚 Выбрать предмет"),
+])
 
 # URL для YandexGPT
 YANDEX_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
-# Системные промпты для разных предметов
+# Промпты для разных предметов
 PROMPTS = {
-    "физика": "Ты — профессор физики. Объясняй законы физики, используй формулы. Решай задачи подробно.",
-    "биология": "Ты — учитель биологии. Объясняй процессы простым языком, используй аналогии из жизни.",
-    "математика": "Ты — репетитор по математике. Показывай пошаговое решение, объясняй каждый шаг.",
-    "химия": "Ты — учитель химии. Объясняй реакции, используй уравнения. Пиши формулы правильно.",
-    "общий": "Ты — умный помощник. Решаешь задачи по любым предметам. Будь дружелюбным и понятным."
+    "physics": "Ты — профессор физики. Объясняй законы физики, используй формулы. Решай задачи подробно и понятно. Формулы пиши в строчку, используй ^ для степеней.",
+    "biology": "Ты — учитель биологии. Объясняй процессы простым языком, используй аналогии из жизни. Пиши понятно и интересно.",
+    "math": "Ты — репетитор по математике. Показывай пошаговое решение, объясняй каждый шаг. Используй ^ для степеней.",
+    "chemistry": "Ты — учитель химии. Объясняй реакции, используй уравнения. Пиши формулы правильно: H2O, CO2 и т.д.",
+    "general": "Ты — умный помощник. Решаешь задачи по любым предметам. Будь дружелюбным и понятным. Отвечай подробно, но не слишком длинно."
 }
 
-def ask_yandex(question, subject="общий"):
+# Названия предметов для кнопок
+SUBJECT_NAMES = {
+    "physics": "🔮 Физика",
+    "biology": "🧬 Биология", 
+    "math": "📐 Математика",
+    "chemistry": "⚗️ Химия",
+    "general": "📚 Общее"
+}
+
+# Хранилище выбранных предметов для пользователей
+user_subjects = {}
+
+def create_subject_keyboard():
+    """Создает клавиатуру с предметами"""
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        InlineKeyboardButton(SUBJECT_NAMES["physics"], callback_data="subj_physics"),
+        InlineKeyboardButton(SUBJECT_NAMES["biology"], callback_data="subj_biology"),
+        InlineKeyboardButton(SUBJECT_NAMES["math"], callback_data="subj_math"),
+        InlineKeyboardButton(SUBJECT_NAMES["chemistry"], callback_data="subj_chemistry"),
+        InlineKeyboardButton(SUBJECT_NAMES["general"], callback_data="subj_general"),
+    ]
+    keyboard.add(*buttons)
+    return keyboard
+
+def format_answer(text):
+    """Форматирует ответ для красивого вывода"""
+    
+    # Заменяем LaTeX
+    text = re.sub(r'\$\$(.*?)\$\$', r'\1', text)
+    text = re.sub(r'\\\((.*?)\\\)', r'\1', text)
+    text = text.replace('\\', '')
+    
+    # Делаем степени красивыми
+    text = re.sub(r'\^2', '²', text)
+    text = re.sub(r'\^3', '³', text)
+    
+    # Разбиваем на строки и добавляем отступы
+    lines = text.split('\n')
+    formatted_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            formatted_lines.append('')
+            continue
+            
+        if '=' in line and any(c.isdigit() for c in line):
+            # Формулы
+            formatted_lines.append(f"🔹 {line}")
+        elif line.lower().startswith(('ответ', 'answer')):
+            # Ответ
+            formatted_lines.append(f"\n✅ {line}")
+        elif line.lower().startswith(('где', 'дано', 'given')):
+            # Дано
+            formatted_lines.append(f"\n📌 {line}")
+        elif line[0].isdigit() and '.' in line[:3]:
+            # Нумерованные списки
+            formatted_lines.append(f"   {line}")
+        elif line.startswith(('-', '•')):
+            # Маркированные списки
+            formatted_lines.append(f"   {line}")
+        else:
+            # Обычный текст
+            if len(line) > 0 and line[0].isupper():
+                # Заголовки
+                formatted_lines.append(f"\n📝 {line}")
+            else:
+                formatted_lines.append(f"   {line}")
+    
+    return '\n'.join(formatted_lines)
+
+def ask_yandex(question, subject="general"):
     """Отправляет запрос в YandexGPT"""
     
-    # Выбираем промпт
-    system_prompt = PROMPTS.get(subject, PROMPTS["общий"])
+    system_prompt = PROMPTS.get(subject, PROMPTS["general"])
     
     # Формируем запрос
     data = {
@@ -60,136 +138,187 @@ def ask_yandex(question, subject="общий"):
     }
     
     try:
-        logging.info(f"Отправляю запрос: {question[:50]}...")
+        logging.info(f"Запрос к YandexGPT ({subject})")
         response = requests.post(YANDEX_URL, headers=headers, json=data, timeout=30)
         
         if response.status_code == 200:
             result = response.json()
             answer = result['result']['alternatives'][0]['message']['text']
-            logging.info("Получил ответ от YandexGPT")
             return answer
         else:
             error_text = response.text
-            logging.error(f"Ошибка {response.status_code}: {error_text}")
-            return f"❌ Ошибка YandexGPT: {response.status_code}\n{error_text[:200]}"
+            logging.error(f"Ошибка {response.status_code}")
+            return f"❌ Ошибка YandexGPT: {response.status_code}"
             
-    except requests.exceptions.Timeout:
-        return "⏰ Таймаут. YandexGPT долго думает, попробуй еще раз"
     except Exception as e:
         logging.error(f"Исключение: {e}")
         return f"❌ Ошибка: {str(e)}"
 
-def detect_subject(text):
-    """Определяет предмет по тексту"""
-    text = text.lower()
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Обрабатывает нажатия на кнопки"""
     
-    # Ключевые слова для предметов
-    subjects = {
-        "физика": ["сила", "ток", "напряжение", "сопротивление", "масса", "скорость", 
-                   "ускорение", "ньютон", "джоуль", "физика", "электричество"],
-        "биология": ["клетка", "организм", "фотосинтез", "днк", "эволюция", "биология",
-                     "ген", "белок", "фермент", "сердце", "мозг"],
-        "математика": ["уравнение", "функция", "производная", "интеграл", "корень",
-                       "косинус", "синус", "логарифм", "математика"],
-        "химия": ["реакция", "молекула", "атом", "кислота", "щелочь", "химия",
-                  "вещество", "раствор", "водород", "кислород"]
-    }
-    
-    for subject, keywords in subjects.items():
-        if any(keyword in text for keyword in keywords):
-            return subject
-    
-    return "общий"
+    if call.data.startswith("subj_"):
+        subject = call.data.replace("subj_", "")
+        user_id = call.from_user.id
+        
+        # Сохраняем выбранный предмет
+        user_subjects[user_id] = subject
+        
+        subject_name = SUBJECT_NAMES.get(subject, "Общее")
+        
+        # Редактируем сообщение
+        bot.edit_message_text(
+            f"✅ Выбран предмет: **{subject_name}**\n\nТеперь отправь мне задачу!",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown"
+        )
+        
+        # Отправляем дополнительное сообщение с подсказкой
+        bot.send_message(
+            call.message.chat.id,
+            "📝 Отправь условие задачи, и я решу её с учётом выбранного предмета.\n"
+            "Или используй /subjects чтобы сменить предмет."
+        )
 
-# Команда /start
 @bot.message_handler(commands=['start'])
 def start(message):
-    welcome = """
-👋 Привет! Я бот-помощник на YandexGPT.
+    """Обработчик команды /start"""
+    
+    # Красивое приветствие
+    welcome_text = """
+🚀 **Добро пожаловать!**
 
-📚 Решаю задачи по:
-• Физике ⚡
-• Биологии 🧬
-• Математике 📐
-• Химии ⚗️
+Я — **умный бот-помощник** на базе YandexGPT. Решаю задачи по:
 
-📝 Просто отправь условие задачи!
+🔮 **Физике**     🧬 **Биологии**
+📐 **Математике** ⚗️ **Химии**
+
+📌 **Просто отправь мне условие задачи** — и я покажу подробное решение!
+
+👇 **Выбери предмет** или отправляй задачу сразу (я определю сам)
     """
-    bot.reply_to(message, welcome)
+    
+    # Отправляем приветствие с кнопками
+    bot.send_message(
+        message.chat.id,
+        welcome_text,
+        parse_mode="Markdown",
+        reply_markup=create_subject_keyboard()
+    )
 
-# Команда /help
 @bot.message_handler(commands=['help'])
 def help(message):
+    """Обработчик команды /help"""
+    
     help_text = """
-🔍 **Как пользоваться:**
-1. Отправь текст задачи
-2. Я определю предмет автоматически
-3. Получишь подробное решение
+📖 **Как пользоваться ботом:**
 
-📌 **Примеры:**
-• "Найди силу тока при 220В и 50 Ом"
-• "Что такое фотосинтез?"
-• "Реши 2x + 5 = 15"
+1️⃣ **Отправь задачу** — я определю предмет автоматически
+2️⃣ Или выбери предмет через /subjects
+3️⃣ Получи подробное решение с объяснениями
 
-💡 **Можно указать предмет:**
-[физика] твоя задача
-[биология] твой вопрос
+📌 **Примеры запросов:**
+• `Найди силу тока при 220В и 50 Ом`
+• `Что такое фотосинтез?`
+• `Реши уравнение 2x + 5 = 15`
+
+🔄 **Команды:**
+/start — перезапустить бота
+/subjects — выбрать предмет
+/help — эта справка
+
+⚡ **Бот работает на YandexGPT** — быстро и точно!
     """
-    bot.reply_to(message, help_text, parse_mode="Markdown")
+    
+    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
 
-# Обработка всех сообщений
+@bot.message_handler(commands=['subjects'])
+def subjects(message):
+    """Обработчик команды /subjects"""
+    
+    text = "📚 **Выбери предмет:**\n\nЗадачи будут решаться с учётом выбранной специализации."
+    
+    bot.send_message(
+        message.chat.id,
+        text,
+        parse_mode="Markdown",
+        reply_markup=create_subject_keyboard()
+    )
+
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    user_text = message.text
+    """Обработчик всех текстовых сообщений"""
     
-    # Отправляем "печатает..."
+    user_text = message.text
+    user_id = message.from_user.id
+    
+    # Показываем, что бот печатает
     bot.send_chat_action(message.chat.id, 'typing')
     
-    # Проверяем, указан ли предмет в скобках
-    subject = "общий"
-    clean_text = user_text
+    # Получаем выбранный предмет пользователя (или общий)
+    subject = user_subjects.get(user_id, "general")
+    subject_name = SUBJECT_NAMES.get(subject, "Общее")
     
-    if user_text.startswith('[') and ']' in user_text:
-        end = user_text.find(']')
-        subject_candidate = user_text[1:end].strip().lower()
-        if subject_candidate in PROMPTS:
-            subject = subject_candidate
-            clean_text = user_text[end+1:].strip()
-    else:
-        # Определяем предмет автоматически
-        subject = detect_subject(user_text)
-    
-    # Сообщение о начале решения
+    # Отправляем статус
     status_msg = bot.send_message(
-        message.chat.id, 
-        f"🤔 Решаю задачу по {subject}..."
+        message.chat.id,
+        f"🤔 **Решаю задачу** по {subject_name}...\nЭто займёт несколько секунд.",
+        parse_mode="Markdown"
     )
     
     # Получаем ответ от YandexGPT
-    answer = ask_yandex(clean_text, subject)
+    answer = ask_yandex(user_text, subject)
+    
+    # Форматируем ответ
+    formatted_answer = format_answer(answer)
+    
+    # Создаем клавиатуру для быстрых действий
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("🔄 Новый запрос", callback_data="subj_general"),
+        InlineKeyboardButton("📚 Выбрать предмет", callback_data="subjects")
+    )
     
     # Отправляем ответ
     try:
+        # Пробуем отправить с HTML форматированием
         bot.edit_message_text(
-            f"✅ **Решение:**\n\n{answer}",
+            f"✅ **Решение:**\n\n{formatted_answer}",
             message.chat.id,
             status_msg.message_id,
-            parse_mode="Markdown"
+            parse_mode="HTML",
+            reply_markup=keyboard
         )
     except:
-        # Если Markdown ломается, отправляем без форматирования
-        bot.edit_message_text(
-            f"✅ Решение:\n\n{answer}",
-            message.chat.id,
-            status_msg.message_id
-        )
+        try:
+            # Если HTML не работает, пробуем Markdown
+            bot.edit_message_text(
+                f"✅ **Решение:**\n\n{answer}",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        except:
+            # Если всё сломалось, отправляем просто текст
+            bot.edit_message_text(
+                f"✅ РЕШЕНИЕ:\n\n{answer}",
+                message.chat.id,
+                status_msg.message_id,
+                reply_markup=keyboard
+            )
 
 # Запуск бота
 if __name__ == "__main__":
-    print("🚀 Бот запущен...")
-    print(f"📁 Folder ID: {FOLDER_ID}")
-    print(f"🔑 API Key: {API_KEY[:10]}...")
-    print("🤖 Жду сообщения...")
+    print("╔════════════════════════════════════╗")
+    print("║     🚀 БОТ ЗАПУЩЕН!                ║")
+    print("╠════════════════════════════════════╣")
+    print(f"║ 📁 Folder ID: {FOLDER_ID[:15]}...")
+    print(f"║ 🔑 API Key: {API_KEY[:10]}...")
+    print("║ 🤖 Жду сообщения...                ║")
+    print("╚════════════════════════════════════╝")
     
     while True:
         try:
