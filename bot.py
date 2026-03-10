@@ -5,13 +5,14 @@ import json
 import time
 import logging
 import re
+import base64
 from datetime import datetime
 
-# ======== НАСТРОЙКИ ========
+# ======== ТВОИ ДАННЫЕ ========
 TELEGRAM_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
 FOLDER_ID = "b1g0s9bjamjqrvas5pqr"  # из шага 1
 API_KEY = "AQVNxnq1d97ei8asrSCgEdGN92cXym_faQZ8I3dp"      # из шага 3
-# ============================
+# =============================
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -21,18 +22,20 @@ bot.set_my_commands([
     telebot.types.BotCommand("/start", "🚀 Запустить бота"),
     telebot.types.BotCommand("/help", "📖 Помощь"),
     telebot.types.BotCommand("/subjects", "📚 Выбрать предмет"),
+    telebot.types.BotCommand("/vpn", "🔒 ProrabVPN"),
 ])
 
-# URL для YandexGPT
-YANDEX_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+# URL для API Яндекса
+YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+YANDEX_VISION_URL = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
 
 # Промпты для разных предметов
 PROMPTS = {
-    "physics": "Ты — профессор физики. Объясняй законы физики, используй формулы. Решай задачи подробно и понятно. Формулы пиши в строчку, используй ^ для степеней.",
+    "physics": "Ты — профессор физики. Объясняй законы физики, используй формулы. Решай задачи подробно и понятно. Пиши без LaTeX разметки, используй обычный текст.",
     "biology": "Ты — учитель биологии. Объясняй процессы простым языком, используй аналогии из жизни. Пиши понятно и интересно.",
-    "math": "Ты — репетитор по математике. Показывай пошаговое решение, объясняй каждый шаг. Используй ^ для степеней.",
-    "chemistry": "Ты — учитель химии. Объясняй реакции, используй уравнения. Пиши формулы правильно: H2O, CO2 и т.д.",
-    "general": "Ты — умный помощник. Решаешь задачи по любым предметам. Будь дружелюбным и понятным. Отвечай подробно, но не слишком длинно."
+    "math": "Ты — репетитор по математике. Показывай пошаговое решение, объясняй каждый шаг. Используй обычные символы, без LaTeX.",
+    "chemistry": "Ты — учитель химии. Объясняй реакции, используй уравнения. Пиши формулы в виде H2O, CO2.",
+    "general": "Ты — умный помощник. Решаешь задачи по любым предметам. Будь дружелюбным и понятным. Отвечай без LaTeX разметки."
 }
 
 # Названия предметов для кнопок
@@ -41,78 +44,65 @@ SUBJECT_NAMES = {
     "biology": "🧬 Биология", 
     "math": "📐 Математика",
     "chemistry": "⚗️ Химия",
-    "general": "📚 Общее"
+    "general": "📚 Любой предмет"
 }
 
 # Хранилище выбранных предметов для пользователей
 user_subjects = {}
 
-def create_subject_keyboard():
-    """Создает клавиатуру с предметами"""
+# ========== КЛАВИАТУРЫ ==========
+
+def create_main_keyboard():
+    """Главная клавиатура"""
     keyboard = InlineKeyboardMarkup(row_width=2)
     buttons = [
-        InlineKeyboardButton(SUBJECT_NAMES["physics"], callback_data="subj_physics"),
-        InlineKeyboardButton(SUBJECT_NAMES["biology"], callback_data="subj_biology"),
-        InlineKeyboardButton(SUBJECT_NAMES["math"], callback_data="subj_math"),
-        InlineKeyboardButton(SUBJECT_NAMES["chemistry"], callback_data="subj_chemistry"),
-        InlineKeyboardButton(SUBJECT_NAMES["general"], callback_data="subj_general"),
+        InlineKeyboardButton("🔮 Физика", callback_data="subj_physics"),
+        InlineKeyboardButton("🧬 Биология", callback_data="subj_biology"),
+        InlineKeyboardButton("📐 Математика", callback_data="subj_math"),
+        InlineKeyboardButton("⚗️ Химия", callback_data="subj_chemistry"),
+        InlineKeyboardButton("📚 Любой предмет", callback_data="subj_general"),
+        InlineKeyboardButton("📸 Фото задачи", callback_data="photo_help"),
+        InlineKeyboardButton("🔒 ProrabVPN", callback_data="vpn"),
+        InlineKeyboardButton("📖 Помощь", callback_data="help"),
+        InlineKeyboardButton("📢 Поделиться", callback_data="share")
     ]
     keyboard.add(*buttons)
     return keyboard
 
-def format_answer(text):
-    """Форматирует ответ для красивого вывода"""
-    
-    # Заменяем LaTeX
-    text = re.sub(r'\$\$(.*?)\$\$', r'\1', text)
-    text = re.sub(r'\\\((.*?)\\\)', r'\1', text)
-    text = text.replace('\\', '')
-    
-    # Делаем степени красивыми
-    text = re.sub(r'\^2', '²', text)
-    text = re.sub(r'\^3', '³', text)
-    
-    # Разбиваем на строки и добавляем отступы
-    lines = text.split('\n')
-    formatted_lines = []
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            formatted_lines.append('')
-            continue
-            
-        if '=' in line and any(c.isdigit() for c in line):
-            # Формулы
-            formatted_lines.append(f"🔹 {line}")
-        elif line.lower().startswith(('ответ', 'answer')):
-            # Ответ
-            formatted_lines.append(f"\n✅ {line}")
-        elif line.lower().startswith(('где', 'дано', 'given')):
-            # Дано
-            formatted_lines.append(f"\n📌 {line}")
-        elif line[0].isdigit() and '.' in line[:3]:
-            # Нумерованные списки
-            formatted_lines.append(f"   {line}")
-        elif line.startswith(('-', '•')):
-            # Маркированные списки
-            formatted_lines.append(f"   {line}")
-        else:
-            # Обычный текст
-            if len(line) > 0 and line[0].isupper():
-                # Заголовки
-                formatted_lines.append(f"\n📝 {line}")
-            else:
-                formatted_lines.append(f"   {line}")
-    
-    return '\n'.join(formatted_lines)
+def create_subject_keyboard():
+    """Клавиатура выбора предмета"""
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        InlineKeyboardButton("🔮 Физика", callback_data="subj_physics"),
+        InlineKeyboardButton("🧬 Биология", callback_data="subj_biology"),
+        InlineKeyboardButton("📐 Математика", callback_data="subj_math"),
+        InlineKeyboardButton("⚗️ Химия", callback_data="subj_chemistry"),
+        InlineKeyboardButton("📚 Любой предмет", callback_data="subj_general"),
+        InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+    ]
+    keyboard.add(*buttons)
+    return keyboard
 
-def ask_yandex(question, subject="general"):
+def create_after_answer_keyboard():
+    """Клавиатура после ответа"""
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        InlineKeyboardButton("🔄 Новая задача", callback_data="new_task"),
+        InlineKeyboardButton("📚 Выбрать предмет", callback_data="show_subjects"),
+        InlineKeyboardButton("🔒 ProrabVPN", callback_data="vpn"),
+        InlineKeyboardButton("📖 Помощь", callback_data="help")
+    ]
+    keyboard.add(*buttons)
+    return keyboard
+
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С API ==========
+
+def ask_yandex_gpt(question, subject="general"):
     """Отправляет запрос в YandexGPT"""
     
     system_prompt = PROMPTS.get(subject, PROMPTS["general"])
+    system_prompt += " НЕ ИСПОЛЬЗУЙ LaTeX разметку, доллары, обратные слэши. Пиши обычным текстом."
     
-    # Формируем запрос
     data = {
         "modelUri": f"gpt://{FOLDER_ID}/yandexgpt-lite",
         "completionOptions": {
@@ -121,14 +111,8 @@ def ask_yandex(question, subject="general"):
             "maxTokens": "2000"
         },
         "messages": [
-            {
-                "role": "system",
-                "text": system_prompt
-            },
-            {
-                "role": "user",
-                "text": question
-            }
+            {"role": "system", "text": system_prompt},
+            {"role": "user", "text": question}
         ]
     }
     
@@ -138,174 +122,458 @@ def ask_yandex(question, subject="general"):
     }
     
     try:
-        logging.info(f"Запрос к YandexGPT ({subject})")
-        response = requests.post(YANDEX_URL, headers=headers, json=data, timeout=30)
+        response = requests.post(YANDEX_GPT_URL, headers=headers, json=data, timeout=30)
         
         if response.status_code == 200:
             result = response.json()
-            answer = result['result']['alternatives'][0]['message']['text']
-            return answer
+            return result['result']['alternatives'][0]['message']['text']
         else:
-            error_text = response.text
-            logging.error(f"Ошибка {response.status_code}")
             return f"❌ Ошибка YandexGPT: {response.status_code}"
             
     except Exception as e:
-        logging.error(f"Исключение: {e}")
         return f"❌ Ошибка: {str(e)}"
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    """Обрабатывает нажатия на кнопки"""
+def ask_yandex_vision(photo_bytes):
+    """Отправляет фото в Yandex Vision для распознавания текста"""
     
-    if call.data.startswith("subj_"):
-        subject = call.data.replace("subj_", "")
-        user_id = call.from_user.id
+    # Конвертируем фото в base64
+    encoded_image = base64.b64encode(photo_bytes).decode('utf-8')
+    
+    data = {
+        "folderId": FOLDER_ID,
+        "analyzeSpecs": [{
+            "content": encoded_image,
+            "features": [{
+                "type": "TEXT_DETECTION",
+                "textDetectionConfig": {"languageCodes": ["ru", "en"]}
+            }]
+        }]
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Api-Key {API_KEY}"
+    }
+    
+    try:
+        response = requests.post(YANDEX_VISION_URL, headers=headers, json=data, timeout=30)
         
-        # Сохраняем выбранный предмет
-        user_subjects[user_id] = subject
-        
-        subject_name = SUBJECT_NAMES.get(subject, "Общее")
-        
-        # Редактируем сообщение
-        bot.edit_message_text(
-            f"✅ Выбран предмет: **{subject_name}**\n\nТеперь отправь мне задачу!",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
-        
-        # Отправляем дополнительное сообщение с подсказкой
-        bot.send_message(
-            call.message.chat.id,
-            "📝 Отправь условие задачи, и я решу её с учётом выбранного предмета.\n"
-            "Или используй /subjects чтобы сменить предмет."
-        )
+        if response.status_code == 200:
+            result = response.json()
+            
+            try:
+                blocks = result['results'][0]['results'][0]['textDetection']['pages'][0]['blocks']
+                text_parts = []
+                
+                for block in blocks:
+                    for line in block['lines']:
+                        for word in line['words']:
+                            text_parts.append(word['text'])
+                
+                recognized_text = ' '.join(text_parts)
+                return recognized_text if recognized_text else "❌ Текст на фото не найден"
+                
+            except (KeyError, IndexError):
+                return "❌ Не удалось распознать текст на фото"
+        else:
+            return f"❌ Ошибка Vision API: {response.status_code}"
+            
+    except Exception as e:
+        return f"❌ Ошибка при распознавании: {str(e)}"
+
+def format_answer(text):
+    """Делает ответ красивым"""
+    
+    # Убираем LaTeX
+    text = text.replace('$$', '').replace('$', '')
+    text = text.replace('\\', '').replace('{', '').replace('}', '')
+    text = text.replace('frac', '').replace('cdot', '·')
+    text = text.replace('text', '').replace('displaystyle', '')
+    
+    # Делаем степени красивыми
+    text = re.sub(r'\^2', '²', text)
+    text = re.sub(r'\^3', '³', text)
+    text = re.sub(r'\^(\d+)', r'^\1', text)
+    
+    # Убираем лишние пробелы
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Разбиваем на строки
+    lines = text.split('. ')
+    formatted_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        if '=' in line and any(c.isdigit() for c in line):
+            line = line.replace('=', ' = ')
+            formatted_lines.append(f"🔹 {line}.")
+        elif 'ответ' in line.lower():
+            formatted_lines.append(f"\n✅ {line}.")
+        elif 'дано' in line.lower() or 'найти' in line.lower():
+            formatted_lines.append(f"\n📌 {line}.")
+        elif any(unit in line for unit in ['км/ч', 'м/с', 'кг', 'Дж', 'Н', 'В', 'А', 'Ом']):
+            formatted_lines.append(f"⚡ {line}.")
+        else:
+            if line and line[0].isalpha():
+                line = line[0].upper() + line[1:]
+            formatted_lines.append(f"   {line}.")
+    
+    result = '\n'.join(formatted_lines)
+    
+    # Реклама VPN
+    result += "\n\n━━━━━━━━━━━━━━━━━━━━━\n"
+    result += "🚀 Решено с помощью @ProrabVPN_bot\n"
+    result += "🔒 Всего 200₽/мес"
+    
+    return result
+
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    """Обработчик команды /start"""
-    
-    # Текстовое приветствие без разметки
-    bot.send_message(
-        message.chat.id,
-        "🚀 Добро пожаловать!\n\n"
-        "Я решаю задачи по физике, биологии, математике и химии.\n"
-        "Просто отправь мне условие задачи!",
-        reply_markup=create_subject_keyboard()
-    )
-    
-@bot.message_handler(commands=['help'])
-def help(message):
-    """Обработчик команды /help"""
-    
-    help_text = """
-📖 **Как пользоваться ботом:**
+    """Старт"""
+    welcome_text = """
+🚀 <b>Добро пожаловать в SolverBot!</b>
 
-1️⃣ **Отправь задачу** — я определю предмет автоматически
-2️⃣ Или выбери предмет через /subjects
-3️⃣ Получи подробное решение с объяснениями
+┏━━━━━━━━━━━━━━━━━━━━━┓
+┃ 🔮 Физика           ┃
+┃ 🧬 Биология         ┃
+┃ 📐 Математика       ┃
+┃ ⚗️ Химия            ┃
+┃ 📸 Фото задачи      ┃
+┗━━━━━━━━━━━━━━━━━━━━━┛
 
-📌 **Примеры запросов:**
-• `Найди силу тока при 220В и 50 Ом`
-• `Что такое фотосинтез?`
-• `Реши уравнение 2x + 5 = 15`
+📌 Отправь задачу или выбери предмет!
 
-🔄 **Команды:**
-/start — перезапустить бота
-/subjects — выбрать предмет
-/help — эта справка
-
-⚡ **Бот работает на YandexGPT** — быстро и точно!
+🔒 Наш партнер: @ProrabVPN_bot - 200₽/мес
     """
     
-    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
+    bot.send_message(
+        message.chat.id,
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=create_main_keyboard()
+    )
+
+@bot.message_handler(commands=['help'])
+def help(message):
+    """Помощь"""
+    help_text = """
+📖 <b>Помощь</b>
+
+📝 <b>Текстом:</b>
+• Просто отправь условие
+• Я определю предмет сам
+
+📸 <b>Фото:</b>
+• Сфоткай задачу
+• Отправь фото
+• Я распознаю и решу
+
+🎯 <b>Примеры:</b>
+• Сила тока при 220В и 50 Ом
+• Что такое фотосинтез?
+• Реши 2x + 5 = 15
+
+🔒 <b>VPN:</b> @ProrabVPN_bot - 200₽/мес
+    """
+    
+    bot.send_message(message.chat.id, help_text, parse_mode="HTML")
+
+@bot.message_handler(commands=['vpn'])
+def vpn(message):
+    """VPN"""
+    vpn_text = """
+🔒 <b>ProrabVPN</b>
+
+┏━━━━━━━━━━━━━━━━━━━━━┓
+┃ ✅ Быстрый          ┃
+┃ ✅ Безлимитный      ┃
+┃ ✅ 20+ серверов    ┃
+┃ ✅ Все сайты        ┃
+┗━━━━━━━━━━━━━━━━━━━━━┛
+
+💰 <b>200₽/мес</b>
+
+🚀 <b>Переходи:</b> @ProrabVPN_bot
+    """
+    
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("🚀 Перейти", url="https://t.me/ProrabVPN_bot"))
+    
+    bot.send_message(message.chat.id, vpn_text, parse_mode="HTML", reply_markup=keyboard)
 
 @bot.message_handler(commands=['subjects'])
 def subjects(message):
-    """Обработчик команды /subjects"""
-    
-    text = "📚 **Выбери предмет:**\n\nЗадачи будут решаться с учётом выбранной специализации."
-    
+    """Выбор предмета"""
     bot.send_message(
         message.chat.id,
-        text,
-        parse_mode="Markdown",
+        "📚 <b>Выбери предмет:</b>",
+        parse_mode="HTML",
         reply_markup=create_subject_keyboard()
     )
 
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    """Обработчик всех текстовых сообщений"""
-    
-    user_text = message.text
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    """Обработка фото"""
     user_id = message.from_user.id
     
-    # Показываем, что бот печатает
-    bot.send_chat_action(message.chat.id, 'typing')
+    # Получаем фото
+    file_id = message.photo[-1].file_id
+    file_info = bot.get_file(file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
     
-    # Получаем выбранный предмет пользователя (или общий)
-    subject = user_subjects.get(user_id, "general")
-    subject_name = SUBJECT_NAMES.get(subject, "Общее")
-    
-    # Отправляем статус
+    # Статус
     status_msg = bot.send_message(
         message.chat.id,
-        f"🤔 **Решаю задачу** по {subject_name}...\nЭто займёт несколько секунд.",
-        parse_mode="Markdown"
+        "🔍 <b>Распознаю текст...</b>",
+        parse_mode="HTML"
     )
     
-    # Получаем ответ от YandexGPT
-    answer = ask_yandex(user_text, subject)
+    # Распознаем
+    recognized_text = ask_yandex_vision(downloaded_file)
     
-    # Форматируем ответ
+    if recognized_text.startswith("❌"):
+        bot.edit_message_text(
+            f"{recognized_text}\n\n📝 Попробуй отправить текстом.",
+            message.chat.id,
+            status_msg.message_id
+        )
+        return
+    
+    # Показываем распознанный текст
+    bot.edit_message_text(
+        f"✅ <b>Текст:</b>\n\n{recognized_text}\n\n🤔 Решаю...",
+        message.chat.id,
+        status_msg.message_id,
+        parse_mode="HTML"
+    )
+    
+    # Получаем предмет
+    subject = user_subjects.get(user_id, "general")
+    subject_name = SUBJECT_NAMES.get(subject, "Любой предмет")
+    
+    # Решаем
+    solving_msg = bot.send_message(
+        message.chat.id,
+        f"🤔 <b>Решаю</b> по {subject_name}...",
+        parse_mode="HTML"
+    )
+    
+    answer = ask_yandex_gpt(recognized_text, subject)
     formatted_answer = format_answer(answer)
-    
-    # Создаем клавиатуру для быстрых действий
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton("🔄 Новый запрос", callback_data="subj_general"),
-        InlineKeyboardButton("📚 Выбрать предмет", callback_data="subjects")
-    )
     
     # Отправляем ответ
     try:
-        # Пробуем отправить с HTML форматированием
         bot.edit_message_text(
-            f"✅ **Решение:**\n\n{formatted_answer}",
+            f"✅ <b>Решение:</b>\n\n{formatted_answer}",
+            message.chat.id,
+            solving_msg.message_id,
+            parse_mode="HTML",
+            reply_markup=create_after_answer_keyboard()
+        )
+    except:
+        bot.edit_message_text(
+            f"✅ Решение:\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🚀 @ProrabVPN_bot - 200₽/мес",
+            message.chat.id,
+            solving_msg.message_id,
+            reply_markup=create_after_answer_keyboard()
+        )
+
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    """Обработка текста"""
+    user_text = message.text
+    user_id = message.from_user.id
+    
+    bot.send_chat_action(message.chat.id, 'typing')
+    
+    subject = user_subjects.get(user_id, "general")
+    subject_name = SUBJECT_NAMES.get(subject, "Любой предмет")
+    
+    status_msg = bot.send_message(
+        message.chat.id,
+        f"🤔 <b>Решаю</b> по {subject_name}...",
+        parse_mode="HTML"
+    )
+    
+    answer = ask_yandex_gpt(user_text, subject)
+    formatted_answer = format_answer(answer)
+    
+    try:
+        bot.edit_message_text(
+            f"✅ <b>Решение:</b>\n\n{formatted_answer}",
             message.chat.id,
             status_msg.message_id,
             parse_mode="HTML",
-            reply_markup=keyboard
+            reply_markup=create_after_answer_keyboard()
         )
     except:
-        try:
-            # Если HTML не работает, пробуем Markdown
-            bot.edit_message_text(
-                f"✅ **Решение:**\n\n{answer}",
-                message.chat.id,
-                status_msg.message_id,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-        except:
-            # Если всё сломалось, отправляем просто текст
-            bot.edit_message_text(
-                f"✅ РЕШЕНИЕ:\n\n{answer}",
-                message.chat.id,
-                status_msg.message_id,
-                reply_markup=keyboard
-            )
+        bot.edit_message_text(
+            f"✅ Решение:\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🚀 @ProrabVPN_bot - 200₽/мес",
+            message.chat.id,
+            status_msg.message_id,
+            reply_markup=create_after_answer_keyboard()
+        )
 
-# Запуск бота
+# ========== ОБРАБОТЧИК КНОПОК ==========
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Обработка нажатий на кнопки"""
+    
+    if call.data == "vpn":
+        text = """
+🔒 <b>ProrabVPN</b>
+
+┏━━━━━━━━━━━━━━━━━━━━━┓
+┃ ✅ Быстрый          ┃
+┃ ✅ Безлимитный      ┃
+┃ ✅ 20+ серверов    ┃
+┃ ✅ Все сайты        ┃
+┗━━━━━━━━━━━━━━━━━━━━━┛
+
+💰 <b>200₽/мес</b>
+
+🚀 <b>Переходи:</b> @ProrabVPN_bot
+        """
+        
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(
+            InlineKeyboardButton("🚀 Перейти", url="https://t.me/ProrabVPN_bot"),
+            InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        )
+        
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    elif call.data == "help":
+        text = """
+📖 <b>Помощь</b>
+
+📝 <b>Текстом:</b> просто отправь задачу
+📸 <b>Фото:</b> сфоткай и отправь
+📚 <b>Предметы:</b> физика, биология, математика, химия
+
+🔒 <b>VPN:</b> @ProrabVPN_bot - 200₽/мес
+        """
+        
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_to_main"))
+        
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    elif call.data == "share":
+        share_text = "🔮 Отличный бот для решения задач!\n\nРешает по физике, биологии, математике и химии.\n\n👉 @YourBotUsername"
+        
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(
+            InlineKeyboardButton("📤 Поделиться", switch_inline_query=share_text),
+            InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        )
+        
+        bot.edit_message_text(
+            "📢 <b>Поделись с друзьями!</b>",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    elif call.data == "photo_help":
+        text = """
+📸 <b>Отправь фото задачи!</b>
+
+📌 <b>Советы:</b>
+• Четкий текст
+• Хорошее освещение
+• Без бликов
+
+✅ Я распознаю и решу!
+        """
+        
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=create_subject_keyboard()
+        )
+    
+    elif call.data == "back_to_main":
+        bot.edit_message_text(
+            "🚀 <b>Главное меню</b>",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=create_main_keyboard()
+        )
+    
+    elif call.data == "show_subjects":
+        bot.edit_message_text(
+            "📚 <b>Выбери предмет:</b>",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=create_subject_keyboard()
+        )
+    
+    elif call.data == "new_task":
+        bot.edit_message_text(
+            "📝 Отправь новую задачу!",
+            call.message.chat.id,
+            call.message.message_id
+        )
+    
+    elif call.data.startswith("subj_"):
+        subject = call.data.replace("subj_", "")
+        user_id = call.from_user.id
+        user_subjects[user_id] = subject
+        subject_name = SUBJECT_NAMES.get(subject, "Любой предмет")
+        
+        bot.edit_message_text(
+            f"✅ <b>Выбран предмет:</b> {subject_name}\n\n📝 Теперь отправь задачу!",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML"
+        )
+
+# ========== ЗАПУСК ==========
+
 if __name__ == "__main__":
     print("╔════════════════════════════════════╗")
-    print("║     🚀 БОТ ЗАПУЩЕН!                ║")
+    print("║     🚀 SOLVERBOT ЗАПУЩЕН!          ║")
     print("╠════════════════════════════════════╣")
-    print(f"║ 📁 Folder ID: {FOLDER_ID[:15]}...")
-    print(f"║ 🔑 API Key: {API_KEY[:10]}...")
-    print("║ 🤖 Жду сообщения...                ║")
+    print(f"║ 📁 Folder ID: {FOLDER_ID[:15]}...   ║")
+    print(f"║ 🔑 API Key: {API_KEY[:10]}...        ║")
+    print("║ 📸 Фото: ✓                          ║")
+    print("║ 🔒 VPN: @ProrabVPN_bot              ║")
+    print("║ 💰 Цена: 200₽/мес                   ║")
     print("╚════════════════════════════════════╝")
+    
+    # Устанавливаем библиотеку pillow если нет
+    try:
+        from PIL import Image
+        print("📸 Pillow установлен")
+    except ImportError:
+        print("📸 Устанавливаю Pillow...")
+        import subprocess
+        subprocess.check_call(['pip', 'install', 'pillow'])
+        print("✅ Pillow установлен")
     
     while True:
         try:
