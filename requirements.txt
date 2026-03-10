@@ -1,5 +1,2 @@
-aiogram==3.10.0
-aiosqlite==0.19.0
-aiofiles==23.2.1
-openai
-python-dotenv
+pyTelegramBotAPI==4.14.0
+requests==2.31.0
