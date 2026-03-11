@@ -7,6 +7,7 @@ import base64
 import time
 import sqlite3
 from datetime import datetime, timedelta
+import threading
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
@@ -23,48 +24,63 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 YANDEX_VISION_URL = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
 
-# ========== БАЗА ДАННЫХ ==========
-conn = sqlite3.connect('bot.db', check_same_thread=False)
-cursor = conn.cursor()
+# ========== БАЗА ДАННЫХ (переработано для многопоточности) ==========
+# Вместо одного глобального соединения будем создавать соединение в каждом потоке
+# и передавать курсор. Но для простоты используем локальное хранилище для потоков.
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    joined_date TEXT,
-    requests_today INTEGER DEFAULT 0,
-    last_request_date TEXT,
-    bonus_balance INTEGER DEFAULT 0,
-    referral_code TEXT UNIQUE,
-    referrer_id INTEGER,
-    subscribed INTEGER DEFAULT 0,
-    last_check TEXT,
-    is_blocked INTEGER DEFAULT 0,
-    total_requests INTEGER DEFAULT 0
-)
-''')
+thread_local = threading.local()
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS referrals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    inviter_id INTEGER,
-    invitee_id INTEGER,
-    date TEXT,
-    rewarded INTEGER DEFAULT 0
-)
-''')
+def get_db_connection():
+    """Возвращает соединение с БД для текущего потока"""
+    if not hasattr(thread_local, 'conn'):
+        thread_local.conn = sqlite3.connect('bot.db', check_same_thread=False)
+        thread_local.conn.row_factory = sqlite3.Row
+    return thread_local.conn
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS admin_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    admin_id INTEGER,
-    action TEXT,
-    target TEXT,
-    date TEXT
-)
-''')
-conn.commit()
+def init_db():
+    """Инициализация таблиц (вызывается один раз при старте)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        joined_date TEXT,
+        requests_today INTEGER DEFAULT 0,
+        last_request_date TEXT,
+        bonus_balance INTEGER DEFAULT 0,
+        referral_code TEXT UNIQUE,
+        referrer_id INTEGER,
+        subscribed INTEGER DEFAULT 0,
+        last_check TEXT,
+        is_blocked INTEGER DEFAULT 0,
+        total_requests INTEGER DEFAULT 0
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS referrals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inviter_id INTEGER,
+        invitee_id INTEGER,
+        date TEXT,
+        rewarded INTEGER DEFAULT 0
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS admin_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        admin_id INTEGER,
+        action TEXT,
+        target TEXT,
+        date TEXT
+    )
+    ''')
+    conn.commit()
+
+init_db()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
@@ -72,12 +88,17 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 def get_user(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    return cursor.fetchone()
+    row = cursor.fetchone()
+    return row
 
 def create_user(user_id, username, first_name, referrer_id=None):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     now = datetime.now().isoformat()
-    # Генерация уникального реферального кода (на основе user_id в base64)
+    # Генерация уникального реферального кода
     referral_code = base64.urlsafe_b64encode(str(user_id).encode()).decode().replace('=', '')[:10]
     cursor.execute('''
         INSERT OR IGNORE INTO users 
@@ -88,6 +109,8 @@ def create_user(user_id, username, first_name, referrer_id=None):
     return referral_code
 
 def update_user_subscription(user_id, subscribed):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("UPDATE users SET subscribed=?, last_check=? WHERE user_id=?", 
                    (1 if subscribed else 0, datetime.now().isoformat(), user_id))
     conn.commit()
@@ -106,13 +129,14 @@ def is_subscribed(user_id):
         subscribed = status in ['creator', 'administrator', 'member', 'restricted']
     except Exception as e:
         logging.error(f"Subscription check error for {user_id}: {e}")
-        # Если канал недоступен, считаем подписку отсутствующей, но не кешируем ошибку
         return False
     update_user_subscription(user_id, subscribed)
     return subscribed
 
 def check_and_reset_daily(user_id):
     """Сбрасывает requests_today, если прошёл день"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
     user = get_user(user_id)
     if not user:
         return
@@ -130,7 +154,6 @@ def can_make_request(user_id):
     if not user:
         return False, 0, 0
     check_and_reset_daily(user_id)
-    # обновляем данные после сброса
     user = get_user(user_id)
     daily_used = user[4]
     bonus = user[6]
@@ -140,22 +163,27 @@ def can_make_request(user_id):
 
 def increment_request(user_id):
     """Увеличивает счётчик использованных запросов. Сначала тратятся бесплатные, потом бонусные."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
     user = get_user(user_id)
     if not user:
         return
     if user[4] < 10:
         cursor.execute("UPDATE users SET requests_today = requests_today + 1 WHERE user_id=?", (user_id,))
     else:
-        # если бесплатные кончились, тратим бонусные
         cursor.execute("UPDATE users SET bonus_balance = bonus_balance - 1 WHERE user_id=? AND bonus_balance > 0", (user_id,))
     cursor.execute("UPDATE users SET total_requests = total_requests + 1 WHERE user_id=?", (user_id,))
     conn.commit()
 
 def add_bonus(user_id, amount):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("UPDATE users SET bonus_balance = bonus_balance + ? WHERE user_id=?", (amount, user_id))
     conn.commit()
 
 def log_admin(admin_id, action, target):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("INSERT INTO admin_logs (admin_id, action, target, date) VALUES (?, ?, ?, ?)",
                    (admin_id, action, target, datetime.now().isoformat()))
     conn.commit()
@@ -196,8 +224,7 @@ def main_keyboard():
         InlineKeyboardButton("📚 Любой", callback_data="subj_general"),
         InlineKeyboardButton("🔒 VPN 20+", callback_data="vpn"),
         InlineKeyboardButton("📖 Помощь", callback_data="help"),
-        InlineKeyboardButton("📸 Фото задачи", callback_data="photo_help"),
-        InlineKeyboardButton("⭐ Купить запросы", callback_data="buy_stars")  # если добавишь звёзды
+        InlineKeyboardButton("📸 Фото задачи", callback_data="photo_help")
     ]
     keyboard.add(*buttons)
     return keyboard
@@ -324,7 +351,8 @@ def start(message):
     referrer_id = None
     if len(args) > 1 and args[1].startswith('ref_'):
         ref_code = args[1][4:]
-        # Ищем пользователя с таким referral_code
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute("SELECT user_id FROM users WHERE referral_code=?", (ref_code,))
         row = cursor.fetchone()
         if row:
@@ -333,9 +361,6 @@ def start(message):
     user = get_user(user_id)
     if not user:
         create_user(user_id, username, first_name, referrer_id)
-    else:
-        # Если пользователь уже есть, но реферальный код передан (повторный старт) — игнорируем
-        pass
 
     text = """
 🚀 <b>РЕШАТОР ЗАДАЧ</b>
@@ -351,6 +376,9 @@ def start(message):
 
 Выбери предмет или отправь задачу!
     """
+    # Проверяем подписку, но не блокируем, просто напоминаем
+    if not is_subscribed(user_id) and not is_admin(user_id):
+        bot.send_message(user_id, "⚠️ Для использования бота необходимо подписаться на канал.", reply_markup=subscribe_keyboard())
     bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_keyboard())
 
 @bot.message_handler(commands=['referral'])
@@ -362,7 +390,8 @@ def referral(message):
         return
     ref_code = user[7]  # referral_code
     link = f"https://t.me/{bot.get_me().username}?start=ref_{ref_code}"
-    # Подсчёт приглашённых
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM referrals WHERE inviter_id=? AND rewarded=1", (user_id,))
     invited = cursor.fetchone()[0]
     bot.send_message(user_id,
@@ -385,7 +414,7 @@ def balance(message):
         user_id,
         f"📊 Твой баланс на сегодня:\n"
         f"• Бесплатных осталось: {daily_left}/10\n"
-        f"• Бонусных (куплено + рефералы): {bonus}\n"
+        f"• Бонусных (рефералы): {bonus}\n"
         f"• Всего доступно: {daily_left + bonus}"
     )
 
@@ -501,7 +530,8 @@ def callback_handler(call):
             user = get_user(user_id)
             # Начисляем бонусы, если есть реферер и ещё не начисляли
             if user and user[8]:  # есть referrer_id
-                # Проверим, есть ли уже запись в referrals
+                conn = get_db_connection()
+                cursor = conn.cursor()
                 cursor.execute("SELECT rewarded FROM referrals WHERE inviter_id=? AND invitee_id=?", (user[8], user_id))
                 row = cursor.fetchone()
                 if not row:
@@ -527,6 +557,8 @@ def callback_handler(call):
         return
 
     if data == "admin_stats":
+        conn = get_db_connection()
+        cursor = conn.cursor()
         total_users = cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         active_today = cursor.execute("SELECT COUNT(*) FROM users WHERE last_request_date=date('now')").fetchone()[0]
         total_requests = cursor.execute("SELECT SUM(total_requests) FROM users").fetchone()[0] or 0
@@ -537,7 +569,8 @@ def callback_handler(call):
         bot.edit_message_text(text, user_id, call.message.message_id, parse_mode="HTML", reply_markup=back_keyboard())
 
     elif data == "admin_userlist":
-        # Покажем последних 10 пользователей с их ID и запросами
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute("SELECT user_id, first_name, username, total_requests, requests_today, bonus_balance FROM users ORDER BY user_id DESC LIMIT 10")
         rows = cursor.fetchall()
         if not rows:
@@ -567,6 +600,8 @@ def process_broadcast(message):
 
 def confirm_broadcast(message, text):
     if message.text == '/yes':
+        conn = get_db_connection()
+        cursor = conn.cursor()
         users = cursor.execute("SELECT user_id FROM users WHERE subscribed=1 AND is_blocked=0").fetchall()
         success = 0
         failed = 0
@@ -599,6 +634,8 @@ def process_grant(message):
 def process_block(message):
     try:
         uid = int(message.text.strip())
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute("UPDATE users SET is_blocked=1 WHERE user_id=?", (uid,))
         conn.commit()
         bot.send_message(message.chat.id, f"✅ Пользователь {uid} заблокирован.")
