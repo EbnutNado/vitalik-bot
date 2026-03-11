@@ -326,13 +326,71 @@ def extract_possible_math(question):
         return match.group(0)
     return None
 
+def trig_fallback(question):
+    """Обрабатывает типичные тригонометрические запросы с опечатками."""
+    q = question.lower().strip()
+    # убираем пробелы
+    q = re.sub(r'\s+', '', q)
+    # различные варианты написания косинуса
+    patterns = [
+        (r'(cos|косинус|кос|cosinus|косинуса?)\s*(\d+)', lambda m: f"cos({m.group(2)}°)"),
+        (r'(sin|синус|син)\s*(\d+)', lambda m: f"sin({m.group(2)}°)"),
+        (r'(tan|tg|тангенс|тг|тангенса?)\s*(\d+)', lambda m: f"tan({m.group(2)}°)")
+    ]
+    for pat, fmt in patterns:
+        match = re.search(pat, q)
+        if match:
+            angle = match.group(2)
+            # стандартные значения
+            if angle in ['30', '45', '60', '90', '0']:
+                if 'cos' in match.group(0) or 'кос' in match.group(0):
+                    if angle == '30':
+                        return "cos 30° = √3/2 ≈ 0.8660\n\nОтвет: 0.8660"
+                    elif angle == '45':
+                        return "cos 45° = √2/2 ≈ 0.7071\n\nОтвет: 0.7071"
+                    elif angle == '60':
+                        return "cos 60° = 1/2 = 0.5\n\nОтвет: 0.5"
+                    elif angle == '90':
+                        return "cos 90° = 0\n\nОтвет: 0"
+                    elif angle == '0':
+                        return "cos 0° = 1\n\nОтвет: 1"
+                elif 'sin' in match.group(0) or 'син' in match.group(0):
+                    if angle == '30':
+                        return "sin 30° = 1/2 = 0.5\n\nОтвет: 0.5"
+                    elif angle == '45':
+                        return "sin 45° = √2/2 ≈ 0.7071\n\nОтвет: 0.7071"
+                    elif angle == '60':
+                        return "sin 60° = √3/2 ≈ 0.8660\n\nОтвет: 0.8660"
+                    elif angle == '90':
+                        return "sin 90° = 1\n\nОтвет: 1"
+                    elif angle == '0':
+                        return "sin 0° = 0\n\nОтвет: 0"
+                elif 'tan' in match.group(0) or 'тангенс' in match.group(0):
+                    if angle == '30':
+                        return "tan 30° = √3/3 ≈ 0.5774\n\nОтвет: 0.5774"
+                    elif angle == '45':
+                        return "tan 45° = 1\n\nОтвет: 1"
+                    elif angle == '60':
+                        return "tan 60° = √3 ≈ 1.732\n\nОтвет: 1.732"
+                    elif angle == '90':
+                        return "tan 90° не определен (бесконечность)"
+                    elif angle == '0':
+                        return "tan 0° = 0\n\nОтвет: 0"
+            else:
+                # неизвестный угол, но можем дать общую формулу
+                func = 'cos' if 'cos' in match.group(0) or 'кос' in match.group(0) else ('sin' if 'sin' in match.group(0) or 'син' in match.group(0) else 'tan')
+                return f"{func}({angle}°) – вычислите с помощью калькулятора.\n\nОтвет: требуется численное значение."
+    return None
+
 def clean_answer(text, original_question=""):
     """Очищает ответ и возвращает читаемый текст. При пустом ответе пытается восстановить."""
+    # Сначала пробуем тригонометрический fallback
+    trig = trig_fallback(original_question)
+    if trig:
+        return trig
+
     if not text or len(text.strip()) < 2:
         if original_question:
-            lower_q = original_question.lower()
-            if 'кос' in lower_q and '30' in lower_q:
-                return "cos 30° = √3/2 ≈ 0.8660\n\nОтвет: 0.8660"
             expr = extract_possible_math(original_question)
             if expr:
                 calc = safe_eval_math(expr)
@@ -362,9 +420,6 @@ def clean_answer(text, original_question=""):
 
     if len(text) < 2:
         if original_question:
-            lower_q = original_question.lower()
-            if 'кос' in lower_q and '30' in lower_q:
-                return "cos 30° = √3/2 ≈ 0.8660\n\nОтвет: 0.8660"
             expr = extract_possible_math(original_question)
             if expr:
                 calc = safe_eval_math(expr)
@@ -541,6 +596,14 @@ def handle_text(message):
     subject = user_subjects.get(user_id, "general")
     question = message.text.strip()
     msg = bot.send_message(user_id, "🤔 Думаю...")
+    # Сначала проверяем, не можем ли мы ответить без GPT (триггеры)
+    trig = trig_fallback(question)
+    if trig:
+        increment_request(user_id)  # всё равно считаем запрос
+        bot.edit_message_text(
+            f"✅ <b>Решение:</b>\n\n{trig}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+            user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
+        return
     answer = ask_yandex_gpt(question, subject)
     cleaned = clean_answer(answer, question)
     increment_request(user_id)
@@ -722,6 +785,7 @@ if __name__ == "__main__":
     print("║ ✅ Промпты максимально усилены     ║")
     print("║ ✅ Fallback для арифметики         ║")
     print("║ ✅ Исправление опечаток            ║")
+    print("║ ✅ Тригонометрический fallback     ║")
     print("║ ✅ Повторные попытки при пустоте   ║")
     print("║ ✅ Кнопки рефералки и баланса      ║")
     print("║ ✅ Распознавание фото               ║")
