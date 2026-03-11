@@ -158,7 +158,7 @@ def log_admin(admin_id, action, target):
 
 # ========== УСИЛЕННЫЕ ПРОМПТЫ ДЛЯ ВСЕХ ПРЕДМЕТОВ ==========
 PROMPTS = {
-    "math": """Ты — профессор математики с 30-летним стажем. Твоя задача — давать точные, полные и понятные ответы на любые математические вопросы.
+    "math": """Ты — профессор математики. Твоя задача — давать точные, полные и понятные ответы на любые математические вопросы.
     Требования к ответу:
     - НИКОГДА не используй LaTeX-разметку (никаких $, $$, \\, {}).
     - Для корней используй символ √ (например, √2, √(x+1)).
@@ -266,11 +266,9 @@ def admin_keyboard():
 def safe_eval_math(expr):
     """Безопасно вычисляет простое арифметическое выражение (числа и операторы + - * /)."""
     expr = expr.strip()
-    # Разрешены только цифры, операторы и скобки
     if not re.match(r'^[0-9+\-*/().\s]+$', expr):
         return None
     try:
-        # Ограничиваем eval только математикой
         result = eval(expr, {"__builtins__": None}, {})
         return str(result)
     except:
@@ -279,35 +277,28 @@ def safe_eval_math(expr):
 def clean_answer(text, original_question=""):
     """Очищает ответ от LaTeX, приводит к читаемому виду. При пустом ответе пробует fallback."""
     if not text or len(text.strip()) < 2:
-        # Пробуем вычислить простую арифметику
         if original_question:
             calc = safe_eval_math(original_question)
             if calc:
                 return f"Результат: {calc}\n\nОтвет: {calc}"
         return "❌ Нейросеть вернула пустой ответ. Пожалуйста, переформулируйте вопрос."
 
-    # Удаляем LaTeX-конструкции
     text = re.sub(r'\\[\[\]\(\)]', '', text)
     text = re.sub(r'\$\$.*?\$\$', '', text, flags=re.DOTALL)
     text = re.sub(r'\$.*?\$', '', text, flags=re.DOTALL)
     text = text.replace('\\', '').replace('{', '').replace('}', '')
 
-    # Заменяем sqrt на √
     text = re.sub(r'sqrt\((\d+)\)', r'√\1', text)
     text = re.sub(r'sqrt\(([^)]+)\)', r'√(\1)', text)
 
-    # Степени
     text = re.sub(r'\^2', '²', text)
     text = re.sub(r'\^3', '³', text)
 
-    # Умножение
     text = text.replace('*', '·')
 
-    # Лишние пробелы
     text = re.sub(r'\s+', ' ', text).strip()
 
     if len(text) < 2:
-        # Если после очистки осталось мало, пробуем fallback
         if original_question:
             calc = safe_eval_math(original_question)
             if calc:
@@ -319,7 +310,6 @@ def clean_answer(text, original_question=""):
 # ========== ЗАПРОСЫ К YANDEX ==========
 def ask_yandex_gpt(question, subject):
     system_prompt = PROMPTS.get(subject, PROMPTS["general"])
-    # Добавляем жёсткое требование отвечать
     system_prompt += "\nОТВЕЧАЙ ВСЕГДА. НЕ ИСПОЛЬЗУЙ LaTeX. НЕ ОСТАВЛЯЙ ПУСТЫХ ОТВЕТОВ."
 
     data = {
@@ -375,8 +365,9 @@ def check_sub_and_limit(handler_func):
         allowed, remaining, bonus = can_make_request(user_id)
         if not allowed and not is_admin(user_id):
             bot.send_message(user_id,
-                f"❌ Ты исчерпал дневной лимит (10 + {bonus} бонусных).\n"
-                "Возвращайся завтра или пригласи друга (кнопка «🔗 Рефералка»).")
+                f"❌ У тебя закончились запросы.\n"
+                f"Доступно сегодня: 10 бесплатных + {bonus} бонусных.\n"
+                "Возвращайся завтра (бесплатные обновятся) или пригласи друга (кнопка «🔗 Рефералка»).")
             return
         return handler_func(message)
     return wrapper
