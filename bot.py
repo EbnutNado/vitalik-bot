@@ -7,15 +7,13 @@ import base64
 import time
 import sqlite3
 from datetime import datetime, timedelta
-import threading
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
 FOLDER_ID = "b1g0s9bjamjqrvas5pqr"
 API_KEY = "AQVNxnq1d97ei8asrSCgEdGN92cXym_faQZ8I3dp"  # AQVN...
-CHANNEL_ID = "@kamensk_avtodor_prorab"  # например @my_channel
+CHANNEL_ID = "-1003008379294"  # например @my_channel
 ADMIN_IDS = [5775839902]  # твои Telegram ID
-
 # ===============================
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -77,27 +75,29 @@ def get_user(user_id):
     cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     return cursor.fetchone()
 
-def create_user(user_id, username, first_name, referrer_code=None):
+def create_user(user_id, username, first_name, referrer_id=None):
     now = datetime.now().isoformat()
+    # Генерация уникального реферального кода (на основе user_id в base64)
     referral_code = base64.urlsafe_b64encode(str(user_id).encode()).decode().replace('=', '')[:10]
     cursor.execute('''
-        INSERT INTO users (user_id, username, first_name, joined_date, last_request_date, referral_code, referrer_id)
+        INSERT OR IGNORE INTO users 
+        (user_id, username, first_name, joined_date, last_request_date, referral_code, referrer_id)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, username, first_name, now, now[:10], referral_code, referrer_code))
+    ''', (user_id, username, first_name, now, now[:10], referral_code, referrer_id))
     conn.commit()
     return referral_code
 
 def update_user_subscription(user_id, subscribed):
-    cursor.execute("UPDATE users SET subscribed=?, last_check=? WHERE user_id=?", (1 if subscribed else 0, datetime.now().isoformat(), user_id))
+    cursor.execute("UPDATE users SET subscribed=?, last_check=? WHERE user_id=?", 
+                   (1 if subscribed else 0, datetime.now().isoformat(), user_id))
     conn.commit()
 
 def is_subscribed(user_id):
-    # Проверяем кеш в БД (не чаще часа)
+    """Проверяет подписку на канал с кешированием на 1 час"""
     user = get_user(user_id)
     if not user:
         return False
-    # индекс полей: 0 user_id,1 username,2 first_name,3 joined,4 requests_today,5 last_req_date,
-    # 6 bonus_balance,7 referral_code,8 referrer_id,9 subscribed,10 last_check,11 is_blocked,12 total_requests
+    # индексы: 9 - subscribed, 10 - last_check
     if user[10] and datetime.now() - datetime.fromisoformat(user[10]) < timedelta(hours=1):
         return user[9] == 1
     try:
@@ -106,7 +106,8 @@ def is_subscribed(user_id):
         subscribed = status in ['creator', 'administrator', 'member', 'restricted']
     except Exception as e:
         logging.error(f"Subscription check error for {user_id}: {e}")
-        subscribed = False
+        # Если канал недоступен, считаем подписку отсутствующей, но не кешируем ошибку
+        return False
     update_user_subscription(user_id, subscribed)
     return subscribed
 
@@ -116,28 +117,38 @@ def check_and_reset_daily(user_id):
     if not user:
         return
     last = user[5]  # last_request_date
-    if last < datetime.now().strftime("%Y-%m-%d"):
+    today = datetime.now().strftime("%Y-%m-%d")
+    if last < today:
         cursor.execute("UPDATE users SET requests_today=0 WHERE user_id=?", (user_id,))
         conn.commit()
 
 def can_make_request(user_id):
     """Проверяет лимит и возвращает (разрешено, остаток_на_сегодня, бонусов)"""
     if is_admin(user_id):
-        return True, 999, 0  # админам без лимитов
+        return True, 999, 0
     user = get_user(user_id)
     if not user:
         return False, 0, 0
     check_and_reset_daily(user_id)
-    # Обновляем данные после возможного сброса
+    # обновляем данные после сброса
     user = get_user(user_id)
-    daily = user[4]  # requests_today
-    bonus = user[6]  # bonus_balance
+    daily_used = user[4]
+    bonus = user[6]
     limit = 10 + bonus
-    remaining = limit - daily
+    remaining = limit - daily_used
     return remaining > 0, max(0, remaining), bonus
 
 def increment_request(user_id):
-    cursor.execute("UPDATE users SET requests_today = requests_today + 1, total_requests = total_requests + 1 WHERE user_id=?", (user_id,))
+    """Увеличивает счётчик использованных запросов. Сначала тратятся бесплатные, потом бонусные."""
+    user = get_user(user_id)
+    if not user:
+        return
+    if user[4] < 10:
+        cursor.execute("UPDATE users SET requests_today = requests_today + 1 WHERE user_id=?", (user_id,))
+    else:
+        # если бесплатные кончились, тратим бонусные
+        cursor.execute("UPDATE users SET bonus_balance = bonus_balance - 1 WHERE user_id=? AND bonus_balance > 0", (user_id,))
+    cursor.execute("UPDATE users SET total_requests = total_requests + 1 WHERE user_id=?", (user_id,))
     conn.commit()
 
 def add_bonus(user_id, amount):
@@ -171,7 +182,7 @@ SUBJECT_NAMES = {
     "general": "📚 Любой"
 }
 
-# Хранилище выбранного предмета для пользователей (в памяти, можно и в БД)
+# Хранилище выбранного предмета (в памяти)
 user_subjects = {}
 
 # ========== КЛАВИАТУРЫ ==========
@@ -185,7 +196,8 @@ def main_keyboard():
         InlineKeyboardButton("📚 Любой", callback_data="subj_general"),
         InlineKeyboardButton("🔒 VPN 20+", callback_data="vpn"),
         InlineKeyboardButton("📖 Помощь", callback_data="help"),
-        InlineKeyboardButton("📸 Фото задачи", callback_data="photo_help")
+        InlineKeyboardButton("📸 Фото задачи", callback_data="photo_help"),
+        InlineKeyboardButton("⭐ Купить запросы", callback_data="buy_stars")  # если добавишь звёзды
     ]
     keyboard.add(*buttons)
     return keyboard
@@ -208,6 +220,7 @@ def admin_keyboard():
         InlineKeyboardButton("📨 Рассылка", callback_data="admin_broadcast"),
         InlineKeyboardButton("🎁 Выдать запросы", callback_data="admin_grant"),
         InlineKeyboardButton("🚫 Блокировка", callback_data="admin_block"),
+        InlineKeyboardButton("📋 Список пользователей", callback_data="admin_userlist"),
         InlineKeyboardButton("🔙 Выход", callback_data="back")
     ]
     keyboard.add(*buttons)
@@ -308,19 +321,18 @@ def start(message):
     first_name = message.from_user.first_name or ""
     # Проверяем реферальный параметр
     args = message.text.split()
-    referrer_code = None
+    referrer_id = None
     if len(args) > 1 and args[1].startswith('ref_'):
         ref_code = args[1][4:]
         # Ищем пользователя с таким referral_code
         cursor.execute("SELECT user_id FROM users WHERE referral_code=?", (ref_code,))
         row = cursor.fetchone()
         if row:
-            referrer_code = row[0]
+            referrer_id = row[0]
     # Создаём пользователя, если его нет
     user = get_user(user_id)
     if not user:
-        create_user(user_id, username, first_name, referrer_code)
-        # Если есть реферер, пока не начисляем бонус — подождём подписки
+        create_user(user_id, username, first_name, referrer_id)
     else:
         # Если пользователь уже есть, но реферальный код передан (повторный старт) — игнорируем
         pass
@@ -356,8 +368,26 @@ def referral(message):
     bot.send_message(user_id,
         f"🔗 Твоя реферальная ссылка:\n{link}\n\n"
         f"Приглашено друзей: {invited}\n"
-        "Бонус начисляется, если друг подписался на канал и начал пользоваться ботом.\n"
-        "За каждого друга ты получаешь +3 бонусных запроса.")
+        "Бонус начисляется, если друг подписался на канал и нажал «Я подписался».\n"
+        "За каждого друга ты получаешь +3 бонусных запроса, а друг +1.")
+
+@bot.message_handler(commands=['balance'])
+def balance(message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        bot.send_message(user_id, "Сначала запусти бота через /start")
+        return
+    daily_used = user[4]
+    bonus = user[6]
+    daily_left = max(0, 10 - daily_used)
+    bot.send_message(
+        user_id,
+        f"📊 Твой баланс на сегодня:\n"
+        f"• Бесплатных осталось: {daily_left}/10\n"
+        f"• Бонусных (куплено + рефералы): {bonus}\n"
+        f"• Всего доступно: {daily_left + bonus}"
+    )
 
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
@@ -371,14 +401,10 @@ def admin_panel(message):
 def handle_text(message):
     user_id = message.from_user.id
     subject = user_subjects.get(user_id, "general")
-    # Статус
     msg = bot.send_message(user_id, "🤔 Думаю...")
-    # Запрос к GPT
     answer = ask_yandex_gpt(message.text, subject)
     answer = format_answer(answer, subject)
-    # Увеличиваем счётчик
     increment_request(user_id)
-    # Отправляем ответ
     bot.edit_message_text(
         f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
         user_id,
@@ -472,18 +498,24 @@ def callback_handler(call):
     # Проверка подписки после нажатия "Я подписался"
     elif data == "check_sub":
         if is_subscribed(user_id):
-            # Если подписка подтверждена, проверяем, не было ли это рефералом
             user = get_user(user_id)
-            if user and user[8] and not user[9]:  # есть referrer_id и ещё не начисляли бонус за подписку?
-                # Начисляем бонус пригласившему (и возможно новичку)
-                add_bonus(user[8], 3)  # +3 пригласившему
-                add_bonus(user_id, 1)  # +1 новичку за подписку
-                cursor.execute("UPDATE users SET subscribed=1 WHERE user_id=?", (user_id,))
-                cursor.execute("INSERT INTO referrals (inviter_id, invitee_id, date, rewarded) VALUES (?,?,?,?)",
-                               (user[8], user_id, datetime.now().isoformat(), 1))
-                conn.commit()
-                bot.edit_message_text("✅ Спасибо за подписку! Тебе начислен бонусный запрос, а твоему другу — 3.",
-                                      user_id, call.message.message_id)
+            # Начисляем бонусы, если есть реферер и ещё не начисляли
+            if user and user[8]:  # есть referrer_id
+                # Проверим, есть ли уже запись в referrals
+                cursor.execute("SELECT rewarded FROM referrals WHERE inviter_id=? AND invitee_id=?", (user[8], user_id))
+                row = cursor.fetchone()
+                if not row:
+                    # Начисляем бонусы
+                    add_bonus(user[8], 3)  # +3 пригласившему
+                    add_bonus(user_id, 1)  # +1 новичку
+                    cursor.execute("INSERT INTO referrals (inviter_id, invitee_id, date, rewarded) VALUES (?,?,?,?)",
+                                   (user[8], user_id, datetime.now().isoformat(), 1))
+                    conn.commit()
+                    bot.edit_message_text("✅ Спасибо за подписку! Тебе начислен бонусный запрос, а твоему другу — 3.",
+                                          user_id, call.message.message_id)
+                else:
+                    bot.edit_message_text("✅ Спасибо за подписку! Бонусы уже были начислены ранее.",
+                                          user_id, call.message.message_id, reply_markup=main_keyboard())
             else:
                 bot.edit_message_text("✅ Спасибо за подписку! Теперь ты можешь пользоваться ботом.",
                                       user_id, call.message.message_id, reply_markup=main_keyboard())
@@ -493,26 +525,45 @@ def callback_handler(call):
     # ===== АДМИН-КНОПКИ =====
     if not is_admin(user_id):
         return
+
     if data == "admin_stats":
         total_users = cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         active_today = cursor.execute("SELECT COUNT(*) FROM users WHERE last_request_date=date('now')").fetchone()[0]
         total_requests = cursor.execute("SELECT SUM(total_requests) FROM users").fetchone()[0] or 0
-        text = f"📊 <b>Статистика</b>\n\n👥 Всего пользователей: {total_users}\n🔥 Активных сегодня: {active_today}\n📝 Всего запросов: {total_requests}"
+        text = (f"📊 <b>Общая статистика</b>\n\n"
+                f"👥 Всего пользователей: {total_users}\n"
+                f"🔥 Активных сегодня: {active_today}\n"
+                f"📝 Всего запросов: {total_requests}")
         bot.edit_message_text(text, user_id, call.message.message_id, parse_mode="HTML", reply_markup=back_keyboard())
+
+    elif data == "admin_userlist":
+        # Покажем последних 10 пользователей с их ID и запросами
+        cursor.execute("SELECT user_id, first_name, username, total_requests, requests_today, bonus_balance FROM users ORDER BY user_id DESC LIMIT 10")
+        rows = cursor.fetchall()
+        if not rows:
+            text = "Список пуст."
+        else:
+            text = "📋 <b>Последние 10 пользователей:</b>\n\n"
+            for r in rows:
+                text += f"🆔 {r[0]} | {r[1] or '?'} @{r[2] or '—'}\n   Всего: {r[3]}, сегодня: {r[4]}, бонус: {r[5]}\n"
+        bot.edit_message_text(text, user_id, call.message.message_id, parse_mode="HTML", reply_markup=back_keyboard())
+
     elif data == "admin_broadcast":
-        bot.send_message(user_id, "Введи текст для рассылки (можно с HTML).")
-        bot.register_next_step_handler_by_chat_id(user_id, process_broadcast)
+        msg = bot.send_message(user_id, "Введи текст для рассылки (можно с HTML).")
+        bot.register_next_step_handler(msg, process_broadcast)
+
     elif data == "admin_grant":
-        bot.send_message(user_id, "Введи ID пользователя и количество запросов через пробел, например:\n123456789 5")
-        bot.register_next_step_handler_by_chat_id(user_id, process_grant)
+        msg = bot.send_message(user_id, "Введи ID пользователя и количество запросов через пробел, например:\n123456789 5")
+        bot.register_next_step_handler(msg, process_grant)
+
     elif data == "admin_block":
-        bot.send_message(user_id, "Введи ID пользователя для блокировки:")
-        bot.register_next_step_handler_by_chat_id(user_id, process_block)
+        msg = bot.send_message(user_id, "Введи ID пользователя для блокировки:")
+        bot.register_next_step_handler(msg, process_block)
 
 def process_broadcast(message):
     text = message.text
     bot.send_message(message.chat.id, f"Рассылка начата. Текст:\n{text}\n\nПодтверди /yes или отмени /no")
-    bot.register_next_step_handler_by_chat_id(message.chat.id, lambda m: confirm_broadcast(m, text))
+    bot.register_next_step_handler(message, lambda m: confirm_broadcast(m, text))
 
 def confirm_broadcast(message, text):
     if message.text == '/yes':
@@ -524,7 +575,8 @@ def confirm_broadcast(message, text):
                 bot.send_message(uid, text, parse_mode="HTML")
                 success += 1
                 time.sleep(0.05)
-            except:
+            except Exception as e:
+                logging.warning(f"Broadcast error to {uid}: {e}")
                 failed += 1
         bot.send_message(message.chat.id, f"✅ Рассылка завершена.\nУспешно: {success}\nОшибок: {failed}")
         log_admin(message.from_user.id, "broadcast", f"success:{success}, fail:{failed}")
@@ -533,9 +585,11 @@ def confirm_broadcast(message, text):
 
 def process_grant(message):
     try:
-        uid, amount = message.text.split()
-        uid = int(uid)
-        amount = int(amount)
+        parts = message.text.split()
+        if len(parts) != 2:
+            raise ValueError
+        uid = int(parts[0])
+        amount = int(parts[1])
         add_bonus(uid, amount)
         bot.send_message(message.chat.id, f"✅ Пользователю {uid} добавлено {amount} бонусных запросов.")
         log_admin(message.from_user.id, "grant", f"{uid} +{amount}")
