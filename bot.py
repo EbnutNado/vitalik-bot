@@ -13,7 +13,7 @@ import threading
 TELEGRAM_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
 FOLDER_ID = "b1g0s9bjamjqrvas5pqr"
 API_KEY = "AQVNxnq1d97ei8asrSCgEdGN92cXym_faQZ8I3dp"  # AQVN...
-CHANNEL_ID = "-1003008379294"  # например @my_channel
+CHANNEL_ID = "@kamensk_avtodor_prorab"  # например @my_channel
 ADMIN_IDS = [5775839902]  # твои Telegram ID
 # ===============================
 
