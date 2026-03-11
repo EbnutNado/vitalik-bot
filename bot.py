@@ -92,6 +92,7 @@ def update_subscription_status(user_id, subscribed):
     conn.commit()
 
 def is_subscribed_now(user_id):
+    """Мгновенная проверка подписки (без кеша)"""
     try:
         chat_member = bot.get_chat_member(CHANNEL_ID, user_id)
         status = chat_member.status
@@ -103,6 +104,7 @@ def is_subscribed_now(user_id):
         return False
 
 def is_subscribed_cached(user_id):
+    """Проверка с кешем 5 минут"""
     user = get_user(user_id)
     if not user:
         return False
@@ -154,34 +156,57 @@ def log_admin(admin_id, action, target):
                    (admin_id, action, target, datetime.now().isoformat()))
     conn.commit()
 
-# ========== ПРОМПТЫ ==========
+# ========== УСИЛЕННЫЕ ПРОМПТЫ ДЛЯ ВСЕХ ПРЕДМЕТОВ ==========
 PROMPTS = {
-    "math": """Ты — профессор математики. Решай уравнения и задачи подробно.
-    - Используй √ для корней, ²/³ для степеней, / для дробей.
+    "math": """Ты — профессор математики с 30-летним стажем. Твоя задача — давать точные, полные и понятные ответы на любые математические вопросы.
+    Требования к ответу:
+    - НИКОГДА не используй LaTeX-разметку (никаких $, $$, \\, {}).
+    - Для корней используй символ √ (например, √2, √(x+1)).
+    - Для степеней используй ², ³, ⁿ (например, x², a³).
+    - Для дробей используй обычный слеш / (например, 3/4, (a+b)/c).
+    - Для умножения используй · или ничего (например, 2·3, 4a).
     - Дискриминант: D = b² - 4ac. Корни: x₁ = (-b + √D)/(2a), x₂ = (-b - √D)/(2a).
-    - НЕ используй LaTeX (никаких $, $$, \\, {}).
-    - В конце обязательно "Ответ: ...".""",
+    - Даже на простые вопросы (например, "2+2") отвечай развёрнуто: "2 + 2 = 4" и краткое пояснение.
+    - В конце обязательно пиши "Ответ: ...".
+    - Не оставляй ответ пустым или коротким — всегда давай решение.
+    """,
 
-    "physics": """Ты — профессор физики. Решай задачи с формулами.
-    - Используй единицы измерения (м/с, кг, Н, Дж).
-    - Степени: м², м³. Корни: √. Дроби: /.
-    - НЕ используй LaTeX.
-    - В конце обязательно "Ответ: ...".""",
+    "physics": """Ты — профессор физики. Твои ответы должны быть точными, с формулами и единицами измерения.
+    Требования:
+    - НИКАКОГО LaTeX.
+    - Степени: м², м³, с⁻¹, кг·м/с².
+    - Корни: √.
+    - Дроби: /.
+    - Единицы измерения пиши через пробел: 10 м/с, 5 кг.
+    - Формулы выделяй с новой строки.
+    - В конце обязательно "Ответ: ...".
+    """,
 
-    "biology": """Ты — учитель биологии. Отвечай просто и понятно, без сложных терминов.
-    - Если вопрос про процесс (фотосинтез, дыхание), опиши его кратко.
-    - НЕ используй LaTeX, не пиши лишних символов.
-    - В конце добавь "Ответ:" или "Вывод:".""",
+    "biology": """Ты — опытный учитель биологии. Объясняй биологические процессы простым, понятным языком, но полно.
+    Требования:
+    - НИКАКОГО LaTeX.
+    - Используй аналогии из жизни.
+    - Структурируй ответ: что это? как работает? зачем нужно?
+    - В конце добавляй "Ответ:" или "Вывод:".
+    """,
 
-    "chemistry": """Ты — химик. Используй формулы веществ (H₂O, CO₂, CH₄). 
-    - Реакции со стрелкой →. Коэффициенты ставь перед формулами.
-    - НЕ используй LaTeX.
-    - В конце "Ответ:".""",
+    "chemistry": """Ты — химик-эксперт. Используй химические формулы и уравнения реакций.
+    Требования:
+    - НИКАКОГО LaTeX.
+    - Формулы веществ: H₂O, CO₂, CH₄ (используй нижние индексы).
+    - Реакции со стрелкой → (например, 2H₂ + O₂ → 2H₂O).
+    - Коэффициенты ставь перед формулами.
+    - Дроби: /, корни: √.
+    - В конце "Ответ:".
+    """,
 
-    "general": """Ты — умный помощник. Отвечай кратко и понятно.
-    - Если нужны формулы, используй / для дробей, √ для корней, ² для квадратов.
-    - НЕ используй LaTeX.
-    - В конце "Ответ:"."""
+    "general": """Ты — интеллектуальный помощник, который отвечает на любые вопросы.
+    Требования:
+    - НИКАКОГО LaTeX.
+    - Если вопрос простой арифметический (например, "2-2"), просто напиши результат с кратким пояснением.
+    - Если вопрос требует объяснения, дай развёрнутый, но понятный ответ.
+    - В конце обязательно "Ответ: ...".
+    """
 }
 
 SUBJECT_NAMES = {
@@ -192,6 +217,7 @@ SUBJECT_NAMES = {
     "general": "📚 Любой"
 }
 
+# Хранилище выбранного предмета (в памяти)
 user_subjects = {}
 
 # ========== КЛАВИАТУРЫ ==========
@@ -209,7 +235,6 @@ def main_keyboard():
         InlineKeyboardButton("📖 Помощь", callback_data="help"),
         InlineKeyboardButton("📸 Фото задачи", callback_data="photo_help")
     ]
-    # Размещаем по 2 кнопки в ряд (row_width=2), добавим все
     keyboard.add(*buttons)
     return keyboard
 
@@ -237,27 +262,66 @@ def admin_keyboard():
     keyboard.add(*buttons)
     return keyboard
 
-# ========== ФОРМАТИРОВАНИЕ ОТВЕТА ==========
-def clean_answer(text):
-    if not text:
-        return "❌ Пустой ответ от нейросети."
+# ========== УЛУЧШЕННАЯ ОЧИСТКА И ФОРМАТИРОВАНИЕ ==========
+def safe_eval_math(expr):
+    """Безопасно вычисляет простое арифметическое выражение (числа и операторы + - * /)."""
+    expr = expr.strip()
+    # Разрешены только цифры, операторы и скобки
+    if not re.match(r'^[0-9+\-*/().\s]+$', expr):
+        return None
+    try:
+        # Ограничиваем eval только математикой
+        result = eval(expr, {"__builtins__": None}, {})
+        return str(result)
+    except:
+        return None
+
+def clean_answer(text, original_question=""):
+    """Очищает ответ от LaTeX, приводит к читаемому виду. При пустом ответе пробует fallback."""
+    if not text or len(text.strip()) < 2:
+        # Пробуем вычислить простую арифметику
+        if original_question:
+            calc = safe_eval_math(original_question)
+            if calc:
+                return f"Результат: {calc}\n\nОтвет: {calc}"
+        return "❌ Нейросеть вернула пустой ответ. Пожалуйста, переформулируйте вопрос."
+
+    # Удаляем LaTeX-конструкции
     text = re.sub(r'\\[\[\]\(\)]', '', text)
     text = re.sub(r'\$\$.*?\$\$', '', text, flags=re.DOTALL)
     text = re.sub(r'\$.*?\$', '', text, flags=re.DOTALL)
     text = text.replace('\\', '').replace('{', '').replace('}', '')
+
+    # Заменяем sqrt на √
     text = re.sub(r'sqrt\((\d+)\)', r'√\1', text)
     text = re.sub(r'sqrt\(([^)]+)\)', r'√(\1)', text)
+
+    # Степени
     text = re.sub(r'\^2', '²', text)
     text = re.sub(r'\^3', '³', text)
+
+    # Умножение
     text = text.replace('*', '·')
+
+    # Лишние пробелы
     text = re.sub(r'\s+', ' ', text).strip()
-    if not text:
-        return "❌ Нейросеть вернула пустой ответ. Попробуйте переформулировать задачу."
+
+    if len(text) < 2:
+        # Если после очистки осталось мало, пробуем fallback
+        if original_question:
+            calc = safe_eval_math(original_question)
+            if calc:
+                return f"Результат: {calc}\n\nОтвет: {calc}"
+        return "❌ Не удалось распознать ответ. Попробуйте переформулировать."
+
     return text
 
 # ========== ЗАПРОСЫ К YANDEX ==========
 def ask_yandex_gpt(question, subject):
     system_prompt = PROMPTS.get(subject, PROMPTS["general"])
+    # Добавляем жёсткое требование отвечать
+    system_prompt += "\nОТВЕЧАЙ ВСЕГДА. НЕ ИСПОЛЬЗУЙ LaTeX. НЕ ОСТАВЛЯЙ ПУСТЫХ ОТВЕТОВ."
+
     data = {
         "modelUri": f"gpt://{FOLDER_ID}/yandexgpt-lite",
         "completionOptions": {"stream": False, "temperature": 0.3, "maxTokens": "1500"},
@@ -400,12 +464,13 @@ def send_balance_info(call_or_message):
 def handle_text(message):
     user_id = message.from_user.id
     subject = user_subjects.get(user_id, "general")
+    question = message.text.strip()
     msg = bot.send_message(user_id, "🤔 Думаю...")
-    answer = ask_yandex_gpt(message.text, subject)
-    answer = clean_answer(answer)
+    answer = ask_yandex_gpt(question, subject)
+    cleaned = clean_answer(answer, question)
     increment_request(user_id)
     bot.edit_message_text(
-        f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+        f"✅ <b>Решение:</b>\n\n{cleaned}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
         user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
 
 # ========== ОБРАБОТЧИК ФОТО ==========
@@ -424,10 +489,10 @@ def handle_photo(message):
         return
     bot.edit_message_text(f"✅ Распознано:\n{recognized}\n\n🤔 Решаю...", user_id, status_msg.message_id)
     answer = ask_yandex_gpt(recognized, subject)
-    answer = clean_answer(answer)
+    cleaned = clean_answer(answer, recognized)
     increment_request(user_id)
     bot.send_message(user_id,
-        f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+        f"✅ <b>Решение:</b>\n\n{cleaned}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
         parse_mode="HTML", reply_markup=back_keyboard())
 
 # ========== ОБРАБОТЧИК КНОПОК ==========
@@ -562,8 +627,8 @@ if __name__ == "__main__":
     print("╔════════════════════════════════════╗")
     print("║     🚀 БОТ ЗАПУЩЕН                 ║")
     print("╠════════════════════════════════════╣")
-    print("║ ✅ Подписка (кеш 5 мин)            ║")
-    print("║ ✅ Рефералы работают               ║")
+    print("║ ✅ Промпты усилены для всех        ║")
+    print("║ ✅ Fallback для арифметики         ║")
     print("║ ✅ Кнопки рефералки и баланса      ║")
     print("║ ✅ Распознавание фото               ║")
     print("║ 🔒 VPN: @ProrabVPN_bot              ║")
