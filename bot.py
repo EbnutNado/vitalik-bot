@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS users (
     last_check TEXT,
     is_blocked INTEGER DEFAULT 0,
     total_requests INTEGER DEFAULT 0,
-    last_reset_date TEXT
+    last_reset_date TEXT,
+    referral_bonus_received INTEGER DEFAULT 0
 )
 ''')
 
@@ -91,14 +92,28 @@ def get_user(user_id):
 
 def create_user(user_id, username, first_name, referrer_id=None):
     now = datetime.now().isoformat()
+    # Генерируем уникальный реферальный код
     referral_code = base64.urlsafe_b64encode(str(user_id).encode()).decode().replace('=', '')[:10]
+    # Проверяем, что код уникален (на случай коллизий)
+    while True:
+        cursor.execute("SELECT user_id FROM users WHERE referral_code=?", (referral_code,))
+        if not cursor.fetchone():
+            break
+        referral_code = base64.urlsafe_b64encode(str(user_id + random.randint(1, 1000)).encode()).decode().replace('=', '')[:10]
+    
     cursor.execute('''
         INSERT OR IGNORE INTO users 
-        (user_id, username, first_name, joined_date, last_request_date, referral_code, referrer_id, last_reset_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, username, first_name, now, now[:10], referral_code, referrer_id, now[:10]))
+        (user_id, username, first_name, joined_date, last_request_date, referral_code, referrer_id, last_reset_date, referral_bonus_received)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, username, first_name, now, now[:10], referral_code, referrer_id, now[:10], 0))
     conn.commit()
     return referral_code
+
+def update_user(user_id, **kwargs):
+    """Обновляет поля пользователя"""
+    for key, value in kwargs.items():
+        cursor.execute(f"UPDATE users SET {key}=? WHERE user_id=?", (value, user_id))
+    conn.commit()
 
 def update_subscription_status(user_id, subscribed):
     cursor.execute("UPDATE users SET subscribed=?, last_check=? WHERE user_id=?", 
@@ -156,7 +171,8 @@ def increment_request(user_id):
         cursor.execute("UPDATE users SET requests_today = requests_today + 1 WHERE user_id=?", (user_id,))
     else:
         cursor.execute("UPDATE users SET bonus_balance = bonus_balance - 1 WHERE user_id=? AND bonus_balance > 0", (user_id,))
-    cursor.execute("UPDATE users SET total_requests = total_requests + 1 WHERE user_id=?", (user_id,))
+    cursor.execute("UPDATE users SET total_requests = total_requests + 1, last_request_date=? WHERE user_id=?", 
+                   (datetime.now().strftime("%Y-%m-%d"), user_id))
     conn.commit()
 
 def add_bonus(user_id, amount):
@@ -168,18 +184,94 @@ def log_admin(admin_id, action, target):
                    (admin_id, action, target, datetime.now().isoformat()))
     conn.commit()
 
+# ========== РЕФЕРАЛЬНАЯ СИСТЕМА ==========
+def process_referral_bonus(invitee_id, inviter_id):
+    """
+    Начисляет бонусы за реферала.
+    Возвращает True, если бонусы начислены впервые.
+    """
+    # Проверяем, не было ли уже начисления для этой пары
+    cursor.execute("SELECT rewarded FROM referrals WHERE inviter_id=? AND invitee_id=?", (inviter_id, invitee_id))
+    if cursor.fetchone():
+        return False
+    
+    # Начисляем бонусы
+    add_bonus(inviter_id, 3)  # +3 пригласившему
+    add_bonus(invitee_id, 1)  # +1 новичку
+    
+    # Записываем в таблицу рефералов
+    cursor.execute("INSERT INTO referrals (inviter_id, invitee_id, date, rewarded) VALUES (?, ?, ?, ?)",
+                   (inviter_id, invitee_id, datetime.now().isoformat(), 1))
+    
+    # Отмечаем, что новичок уже получил бонус за реферала
+    update_user(invitee_id, referral_bonus_received=1)
+    
+    conn.commit()
+    
+    # Отправляем уведомления
+    try:
+        inviter = get_user(inviter_id)
+        inviter_name = inviter[2] or f"пользователь {inviter_id}"
+        bot.send_message(inviter_id, 
+                        f"🎉 По вашей реферальной ссылке зарегистрировался новый пользователь!\n"
+                        f"Вам начислено +3 бонусных запроса.")
+    except Exception as e:
+        logging.warning(f"Failed to notify inviter {inviter_id}: {e}")
+    
+    try:
+        bot.send_message(invitee_id, 
+                        f"🎁 Вы зарегистрировались по реферальной ссылке!\n"
+                        f"Вам начислен +1 бонусный запрос.")
+    except Exception as e:
+        logging.warning(f"Failed to notify invitee {invitee_id}: {e}")
+    
+    return True
+
+def handle_referral_start(user_id, referrer_id):
+    """
+    Обрабатывает переход по реферальной ссылке.
+    """
+    # Получаем данные пользователей
+    inviter = get_user(referrer_id)
+    invitee = get_user(user_id)
+    
+    if not inviter:
+        logging.warning(f"Referrer {referrer_id} not found")
+        return
+    
+    if not invitee:
+        logging.warning(f"Invitee {user_id} not found")
+        return
+    
+    # Проверяем, не является ли реферер самим пользователем
+    if referrer_id == user_id:
+        logging.info(f"User {user_id} tried to refer themselves")
+        return
+    
+    # Проверяем, не получал ли уже новичок бонус за реферала
+    if invitee[14] == 1:  # referral_bonus_received
+        logging.info(f"User {user_id} already received referral bonus")
+        return
+    
+    # Если новичок уже подписан на канал, начисляем бонус сразу
+    if invitee[9] == 1:  # subscribed
+        process_referral_bonus(user_id, referrer_id)
+    else:
+        # Иначе ждём подписки
+        logging.info(f"User {user_id} needs to subscribe first")
+
 # ========== ЕЖЕДНЕВНЫЙ СБРОС ЗАПРОСОВ ==========
 def reset_daily_requests():
     """Сбрасывает requests_today для пользователей, у которых закончились запросы, в 8:00 МСК"""
     while True:
         now = datetime.now()
         # Расчёт времени до следующего сброса (8:00 МСК = UTC+3)
-        target = now.replace(hour=RESET_HOUR, minute=0, second=0, microsecond=0) - timedelta(hours=3)  # переводим в UTC
+        target = now.replace(hour=RESET_HOUR, minute=0, second=0, microsecond=0) - timedelta(hours=3)
         if now >= target:
             target += timedelta(days=1)
         sleep_seconds = (target - now).total_seconds()
         logging.info(f"Сброс запланирован через {sleep_seconds/3600:.1f} часов")
-        time.sleep(sleep_seconds)
+        time.sleep(max(1, sleep_seconds))
         
         try:
             # Получаем пользователей, у которых были запросы сегодня
@@ -206,6 +298,11 @@ def reset_daily_requests():
                     )
                 except Exception as e:
                     logging.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            
+            # Логируем сброс
+            cursor.execute("INSERT INTO daily_reset_log (reset_date, users_reset) VALUES (?, ?)",
+                          (today, len(users_to_reset)))
+            conn.commit()
             
             log_admin(0, "daily_reset", f"Сброшено {len(users_to_reset)} пользователей")
             logging.info(f"Ежедневный сброс выполнен. Сброшено {len(users_to_reset)} пользователей.")
@@ -345,7 +442,7 @@ solver = ProrabBotSolver()
 
 # ========== БАЗА ЗНАНИЙ ДЛЯ ЧАСТЫХ ВОПРОСОВ ==========
 knowledge_base = {
-    "обществознание": {
+    "social": {
         "инфляция": "Инфляция — это повышение общего уровня цен на товары и услуги.\n\n"
                     "Причины: рост денежной массы, увеличение спроса, рост издержек.\n"
                     "Виды: умеренная (до 10% в год), галопирующая (до 50%), гиперинфляция (свыше 50% в месяц).\n"
@@ -373,7 +470,7 @@ knowledge_base = {
                   "Ответ: мораль — это неписаные правила поведения."
     },
     
-    "литература": {
+    "literature": {
         "онегин": "«Евгений Онегин» — роман в стихах А.С. Пушкина.\n\n"
                   "Главные герои: Евгений Онегин, Татьяна Ларина, Владимир Ленский, Ольга Ларина.\n"
                   "Сюжет: Онегин приезжает в деревню, знакомится с Ленским, отвергает любовь Татьяны, убивает Ленского на дуэли, уезжает. Позже встречает Татьяну в свете — она уже замужем, но любит его.\n"
@@ -393,7 +490,7 @@ knowledge_base = {
                         "Ответ: Раскольников — образ страдающего интеллигента, ищущего правду."
     },
     
-    "русский язык": {
+    "russian": {
         "фонетика": "Фонетика — раздел языкознания, изучающий звуки речи.\n\n"
                     "Гласные: 6 основных (а, о, у, э, и, ы).\n"
                     "Согласные: твёрдые/мягкие, звонкие/глухие.\n"
@@ -884,14 +981,46 @@ def start(message):
     first_name = message.from_user.first_name or ""
     args = message.text.split()
     referrer_id = None
+    
+    # Обработка реферального параметра
     if len(args) > 1 and args[1].startswith('ref_'):
         ref_code = args[1][4:]
+        logging.info(f"Referral start with code: {ref_code}")
         cursor.execute("SELECT user_id FROM users WHERE referral_code=?", (ref_code,))
         row = cursor.fetchone()
         if row:
             referrer_id = row[0]
-    if not get_user(user_id):
+            logging.info(f"Found referrer: {referrer_id}")
+    
+    # Создаём пользователя, если его нет
+    user = get_user(user_id)
+    if not user:
         create_user(user_id, username, first_name, referrer_id)
+        logging.info(f"Created new user {user_id} with referrer {referrer_id}")
+        
+        # Если есть реферер, обрабатываем реферальный бонус
+        if referrer_id and referrer_id != user_id:
+            # Проверяем, не получал ли уже новичок бонус
+            cursor.execute("SELECT referral_bonus_received FROM users WHERE user_id=?", (user_id,))
+            bonus_received = cursor.fetchone()[0]
+            if not bonus_received:
+                # Если новичок уже подписан, начисляем сразу
+                if is_subscribed_cached(user_id):
+                    process_referral_bonus(user_id, referrer_id)
+                else:
+                    # Иначе запоминаем реферера для начисления после подписки
+                    update_user(user_id, referrer_id=referrer_id)
+                    logging.info(f"User {user_id} will get referral bonus after subscription")
+    else:
+        # Если пользователь уже есть, но перешёл по реферальной ссылке впервые
+        if referrer_id and referrer_id != user_id and user[8] is None and user[14] == 0:
+            # Обновляем referrer_id
+            update_user(user_id, referrer_id=referrer_id)
+            logging.info(f"Updated referrer for existing user {user_id} to {referrer_id}")
+            
+            # Если уже подписан, начисляем бонус
+            if is_subscribed_cached(user_id):
+                process_referral_bonus(user_id, referrer_id)
 
     bot.send_message(user_id,
         "🚀 <b>ПРОРАБ ГДЗ</b>\n\n"
@@ -899,6 +1028,7 @@ def start(message):
         "🌍 Обществознание\n📚 Литература\n🇷🇺 Русский язык\n📸 Фото задачи\n\n"
         "🔒 <b>VPN 20+ серверов</b> — @ProrabVPN_bot\n💰 200₽/мес",
         parse_mode="HTML", reply_markup=main_keyboard())
+    
     if not is_subscribed_cached(user_id) and not is_admin(user_id):
         bot.send_message(user_id, "⚠️ Для использования бота необходимо подписаться на канал.", reply_markup=subscribe_keyboard())
 
@@ -1075,19 +1205,13 @@ def callback_handler(call):
     elif data == "check_sub":
         if is_subscribed_now(user_id):
             user = get_user(user_id)
-            if user and user[8]:
-                cursor.execute("SELECT rewarded FROM referrals WHERE inviter_id=? AND invitee_id=?", (user[8], user_id))
-                if not cursor.fetchone():
-                    add_bonus(user[8], 3)
-                    add_bonus(user_id, 1)
-                    cursor.execute("INSERT INTO referrals (inviter_id, invitee_id, date, rewarded) VALUES (?,?,?,?)",
-                                   (user[8], user_id, datetime.now().isoformat(), 1))
-                    conn.commit()
-                    bot.edit_message_text("✅ Спасибо за подписку! Тебе начислен бонусный запрос, а твоему другу — 3.",
-                                          user_id, call.message.message_id)
-                else:
-                    bot.edit_message_text("✅ Спасибо за подписку! Бонусы уже были начислены ранее.",
-                                          user_id, call.message.message_id, reply_markup=main_keyboard())
+            
+            # Если есть реферер и ещё не получали бонус
+            if user and user[8] and user[14] == 0:
+                # Начисляем бонус
+                process_referral_bonus(user_id, user[8])
+                bot.edit_message_text("✅ Спасибо за подписку! Тебе начислен бонусный запрос, а твоему другу — 3.",
+                                      user_id, call.message.message_id)
             else:
                 bot.edit_message_text("✅ Спасибо за подписку! Теперь ты можешь пользоваться ботом.",
                                       user_id, call.message.message_id, reply_markup=main_keyboard())
@@ -1103,14 +1227,16 @@ def callback_handler(call):
         active = cursor.execute("SELECT COUNT(*) FROM users WHERE last_request_date=date('now')").fetchone()[0]
         req_sum = cursor.execute("SELECT SUM(total_requests) FROM users").fetchone()[0] or 0
         bonus_sum = cursor.execute("SELECT SUM(bonus_balance) FROM users").fetchone()[0] or 0
+        ref_count = cursor.execute("SELECT COUNT(*) FROM referrals").fetchone()[0]
         bot.edit_message_text(f"📊 <b>Статистика</b>\n\n"
                               f"👥 Всего пользователей: {total}\n"
                               f"🔥 Активных сегодня: {active}\n"
                               f"📝 Всего запросов: {req_sum}\n"
-                              f"🎁 Всего бонусных: {bonus_sum}",
+                              f"🎁 Всего бонусных: {bonus_sum}\n"
+                              f"🔗 Всего рефералов: {ref_count}",
                               user_id, call.message.message_id, parse_mode="HTML", reply_markup=back_keyboard())
     elif data == "admin_userlist":
-        cursor.execute("SELECT user_id, first_name, username, total_requests, requests_today, bonus_balance, subscribed, is_blocked FROM users ORDER BY user_id DESC LIMIT 15")
+        cursor.execute("SELECT user_id, first_name, username, total_requests, requests_today, bonus_balance, subscribed, is_blocked, referrer_id FROM users ORDER BY user_id DESC LIMIT 15")
         rows = cursor.fetchall()
         if not rows:
             text = "Список пуст."
@@ -1119,7 +1245,8 @@ def callback_handler(call):
             for r in rows:
                 sub = "✅" if r[6] else "❌"
                 block = "🚫" if r[7] else ""
-                text += f"🆔 {r[0]} | {r[1] or '?'} @{r[2] or '—'} {sub}{block}\n   Всего: {r[3]}, сегодня: {r[4]}, бонус: {r[5]}\n"
+                ref = f"приглашён {r[8]}" if r[8] else "—"
+                text += f"🆔 {r[0]} | {r[1] or '?'} @{r[2] or '—'} {sub}{block}\n   Всего: {r[3]}, сегодня: {r[4]}, бонус: {r[5]}, {ref}\n"
         bot.edit_message_text(text, user_id, call.message.message_id, parse_mode="HTML", reply_markup=back_keyboard())
     elif data == "admin_broadcast":
         msg = bot.send_message(user_id, "Введи текст для рассылки (можно с HTML).")
@@ -1203,6 +1330,7 @@ if __name__ == "__main__":
     print("║    литература, русский язык               ║")
     print("║ ✅ Ежедневный сброс в 8:00 МСК            ║")
     print("║ ✅ Уведомления о сбросе                    ║")
+    print("║ ✅ Реферальная система ИСПРАВЛЕНА         ║")
     print("║ ✅ Кнопки рефералки и баланса              ║")
     print("║ ✅ Распознавание фото                       ║")
     print("║ ✅ Блокировка/разблокировка                ║")
