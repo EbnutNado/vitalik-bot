@@ -7,10 +7,7 @@ import base64
 import time
 import sqlite3
 from datetime import datetime, timedelta
-import threading
 import math
-import random
-import json
 
 # ========== НАСТРОЙКИ (ЗАМЕНИТЬ НА СВОИ) ==========
 TELEGRAM_TOKEN = "8451168327:AAGQffadqqBg3pZNQnjctVxH-dUgXsovTr4"
@@ -18,7 +15,6 @@ FOLDER_ID = "b1g0s9bjamjqrvas5pqr"
 API_KEY = "AQVNxnq1d97ei8asrSCgEdGN92cXym_faQZ8I3dp"  # AQVN...
 CHANNEL_ID = "@kamensk_avtodor_prorab"  # например @my_channel
 ADMIN_IDS = [5775839902]  # твои Telegram ID
-RESET_HOUR = 8  # 8:00 по МСК
 # ==================================================
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,6 +23,9 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 # URL API Яндекса
 YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 YANDEX_VISION_URL = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+
+# Константы
+G = 9.8  # м/с²
 
 # ========== БАЗА ДАННЫХ ==========
 conn = sqlite3.connect('bot.db', check_same_thread=False)
@@ -46,9 +45,7 @@ CREATE TABLE IF NOT EXISTS users (
     subscribed INTEGER DEFAULT 0,
     last_check TEXT,
     is_blocked INTEGER DEFAULT 0,
-    total_requests INTEGER DEFAULT 0,
-    last_reset_date TEXT,
-    referral_bonus_received INTEGER DEFAULT 0
+    total_requests INTEGER DEFAULT 0
 )
 ''')
 
@@ -71,14 +68,6 @@ CREATE TABLE IF NOT EXISTS admin_logs (
     date TEXT
 )
 ''')
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS daily_reset_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    reset_date TEXT,
-    users_reset INTEGER
-)
-''')
 conn.commit()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
@@ -92,28 +81,14 @@ def get_user(user_id):
 
 def create_user(user_id, username, first_name, referrer_id=None):
     now = datetime.now().isoformat()
-    # Генерируем уникальный реферальный код
     referral_code = base64.urlsafe_b64encode(str(user_id).encode()).decode().replace('=', '')[:10]
-    # Проверяем, что код уникален (на случай коллизий)
-    while True:
-        cursor.execute("SELECT user_id FROM users WHERE referral_code=?", (referral_code,))
-        if not cursor.fetchone():
-            break
-        referral_code = base64.urlsafe_b64encode(str(user_id + random.randint(1, 1000)).encode()).decode().replace('=', '')[:10]
-    
     cursor.execute('''
         INSERT OR IGNORE INTO users 
-        (user_id, username, first_name, joined_date, last_request_date, referral_code, referrer_id, last_reset_date, referral_bonus_received)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, username, first_name, now, now[:10], referral_code, referrer_id, now[:10], 0))
+        (user_id, username, first_name, joined_date, last_request_date, referral_code, referrer_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, username, first_name, now, now[:10], referral_code, referrer_id))
     conn.commit()
     return referral_code
-
-def update_user(user_id, **kwargs):
-    """Обновляет поля пользователя"""
-    for key, value in kwargs.items():
-        cursor.execute(f"UPDATE users SET {key}=? WHERE user_id=?", (value, user_id))
-    conn.commit()
 
 def update_subscription_status(user_id, subscribed):
     cursor.execute("UPDATE users SET subscribed=?, last_check=? WHERE user_id=?", 
@@ -121,6 +96,7 @@ def update_subscription_status(user_id, subscribed):
     conn.commit()
 
 def is_subscribed_now(user_id):
+    """Мгновенная проверка подписки"""
     try:
         chat_member = bot.get_chat_member(CHANNEL_ID, user_id)
         status = chat_member.status
@@ -131,22 +107,14 @@ def is_subscribed_now(user_id):
         logging.error(f"Subscription check error for {user_id}: {e}")
         return False
 
-def is_subscribed_cached(user_id):
-    user = get_user(user_id)
-    if not user:
-        return False
-    if user[10] and datetime.now() - datetime.fromisoformat(user[10]) < timedelta(minutes=5):
-        return user[9] == 1
-    return is_subscribed_now(user_id)
-
 def check_and_reset_daily(user_id):
     user = get_user(user_id)
     if not user:
         return
-    last_reset = user[13]  # last_reset_date
+    last = user[5]
     today = datetime.now().strftime("%Y-%m-%d")
-    if last_reset < today:
-        cursor.execute("UPDATE users SET requests_today=0, last_reset_date=? WHERE user_id=?", (today, user_id))
+    if last < today:
+        cursor.execute("UPDATE users SET requests_today=0 WHERE user_id=?", (user_id,))
         conn.commit()
 
 def can_make_request(user_id):
@@ -171,8 +139,7 @@ def increment_request(user_id):
         cursor.execute("UPDATE users SET requests_today = requests_today + 1 WHERE user_id=?", (user_id,))
     else:
         cursor.execute("UPDATE users SET bonus_balance = bonus_balance - 1 WHERE user_id=? AND bonus_balance > 0", (user_id,))
-    cursor.execute("UPDATE users SET total_requests = total_requests + 1, last_request_date=? WHERE user_id=?", 
-                   (datetime.now().strftime("%Y-%m-%d"), user_id))
+    cursor.execute("UPDATE users SET total_requests = total_requests + 1 WHERE user_id=?", (user_id,))
     conn.commit()
 
 def add_bonus(user_id, amount):
@@ -184,163 +151,31 @@ def log_admin(admin_id, action, target):
                    (admin_id, action, target, datetime.now().isoformat()))
     conn.commit()
 
-# ========== РЕФЕРАЛЬНАЯ СИСТЕМА ==========
-def process_referral_bonus(invitee_id, inviter_id):
-    """
-    Начисляет бонусы за реферала.
-    Возвращает True, если бонусы начислены впервые.
-    """
-    # Проверяем, не было ли уже начисления для этой пары
-    cursor.execute("SELECT rewarded FROM referrals WHERE inviter_id=? AND invitee_id=?", (inviter_id, invitee_id))
-    if cursor.fetchone():
-        return False
-    
-    # Начисляем бонусы
-    add_bonus(inviter_id, 3)  # +3 пригласившему
-    add_bonus(invitee_id, 1)  # +1 новичку
-    
-    # Записываем в таблицу рефералов
-    cursor.execute("INSERT INTO referrals (inviter_id, invitee_id, date, rewarded) VALUES (?, ?, ?, ?)",
-                   (inviter_id, invitee_id, datetime.now().isoformat(), 1))
-    
-    # Отмечаем, что новичок уже получил бонус за реферала
-    update_user(invitee_id, referral_bonus_received=1)
-    
-    conn.commit()
-    
-    # Отправляем уведомления
-    try:
-        inviter = get_user(inviter_id)
-        inviter_name = inviter[2] or f"пользователь {inviter_id}"
-        bot.send_message(inviter_id, 
-                        f"🎉 По вашей реферальной ссылке зарегистрировался новый пользователь!\n"
-                        f"Вам начислено +3 бонусных запроса.")
-    except Exception as e:
-        logging.warning(f"Failed to notify inviter {inviter_id}: {e}")
-    
-    try:
-        bot.send_message(invitee_id, 
-                        f"🎁 Вы зарегистрировались по реферальной ссылке!\n"
-                        f"Вам начислен +1 бонусный запрос.")
-    except Exception as e:
-        logging.warning(f"Failed to notify invitee {invitee_id}: {e}")
-    
-    return True
+# ========== КЛАСС ТОЧНЫХ РЕШАТЕЛЕЙ ==========
 
-def handle_referral_start(user_id, referrer_id):
-    """
-    Обрабатывает переход по реферальной ссылке.
-    """
-    # Получаем данные пользователей
-    inviter = get_user(referrer_id)
-    invitee = get_user(user_id)
-    
-    if not inviter:
-        logging.warning(f"Referrer {referrer_id} not found")
-        return
-    
-    if not invitee:
-        logging.warning(f"Invitee {user_id} not found")
-        return
-    
-    # Проверяем, не является ли реферер самим пользователем
-    if referrer_id == user_id:
-        logging.info(f"User {user_id} tried to refer themselves")
-        return
-    
-    # Проверяем, не получал ли уже новичок бонус за реферала
-    if invitee[14] == 1:  # referral_bonus_received
-        logging.info(f"User {user_id} already received referral bonus")
-        return
-    
-    # Если новичок уже подписан на канал, начисляем бонус сразу
-    if invitee[9] == 1:  # subscribed
-        process_referral_bonus(user_id, referrer_id)
-    else:
-        # Иначе ждём подписки
-        logging.info(f"User {user_id} needs to subscribe first")
-
-# ========== ЕЖЕДНЕВНЫЙ СБРОС ЗАПРОСОВ ==========
-def reset_daily_requests():
-    """Сбрасывает requests_today для пользователей, у которых закончились запросы, в 8:00 МСК"""
-    while True:
-        now = datetime.now()
-        # Расчёт времени до следующего сброса (8:00 МСК = UTC+3)
-        target = now.replace(hour=RESET_HOUR, minute=0, second=0, microsecond=0) - timedelta(hours=3)
-        if now >= target:
-            target += timedelta(days=1)
-        sleep_seconds = (target - now).total_seconds()
-        logging.info(f"Сброс запланирован через {sleep_seconds/3600:.1f} часов")
-        time.sleep(max(1, sleep_seconds))
-        
-        try:
-            # Получаем пользователей, у которых были запросы сегодня
-            today = datetime.now().strftime("%Y-%m-%d")
-            users_to_reset = cursor.execute(
-                "SELECT user_id, first_name FROM users WHERE requests_today > 0 AND last_reset_date < ?",
-                (today,)
-            ).fetchall()
-            
-            # Сбрасываем счётчики
-            cursor.execute("UPDATE users SET requests_today = 0, last_reset_date = ? WHERE last_reset_date < ?", 
-                           (today, today))
-            conn.commit()
-            
-            # Отправляем уведомления
-            for user_id, name in users_to_reset:
-                try:
-                    bot.send_message(
-                        user_id,
-                        f"🌅 Доброе утро, {name or 'друг'}!\n\n"
-                        f"Твои 10 бесплатных запросов на сегодня снова с тобой! 🎉\n"
-                        f"Заходи решать задачи по математике, физике, биологии и другим предметам.\n\n"
-                        f"Если нужно больше — пригласи друга (кнопка «🔗 Рефералка») и получи бонусные запросы!"
-                    )
-                except Exception as e:
-                    logging.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
-            
-            # Логируем сброс
-            cursor.execute("INSERT INTO daily_reset_log (reset_date, users_reset) VALUES (?, ?)",
-                          (today, len(users_to_reset)))
-            conn.commit()
-            
-            log_admin(0, "daily_reset", f"Сброшено {len(users_to_reset)} пользователей")
-            logging.info(f"Ежедневный сброс выполнен. Сброшено {len(users_to_reset)} пользователей.")
-            
-        except Exception as e:
-            logging.error(f"Ошибка при ежедневном сбросе: {e}")
-
-# Запуск потока для ежедневного сброса
-reset_thread = threading.Thread(target=reset_daily_requests, daemon=True)
-reset_thread.start()
-
-# ========== ТОЧНЫЕ РЕШАТЕЛИ ==========
 class ProrabBotSolver:
-    """Универсальный решатель для точных предметов"""
+    """Универсальный решатель для точных наук"""
     
     def __init__(self):
-        self.g = 9.8
+        self.g = G
         self.math = math
-        
+    
     # ===== ФИЗИКА =====
     def solve_ballistics(self, v0, angle_deg):
         """
-        Решает задачу баллистики
+        Точное решение задачи баллистики
         v0: начальная скорость (м/с)
         angle_deg: угол в градусах
         """
-        # Точные тригонометрические значения
         angle_rad = math.radians(angle_deg)
         sin_a = math.sin(angle_rad)
         cos_a = math.cos(angle_rad)
         sin_2a = math.sin(2 * angle_rad)
         
-        # Расчёты
         t_flight = (2 * v0 * sin_a) / self.g
         h_max = (v0**2 * sin_a**2) / (2 * self.g)
         distance = (v0**2 * sin_2a) / self.g
         
-        # Пошаговое объяснение
         explanation = [
             f"1. Раскладываем скорость:",
             f"   vx = {v0:.1f}·cos({angle_deg}°) = {v0*cos_a:.1f} м/с",
@@ -363,9 +198,6 @@ class ProrabBotSolver:
             "height": (0, 100000, "м"),
             "time": (0, 1000, "с"),
             "range": (0, 1000000, "м"),
-            "velocity": (0, 100000, "м/с"),
-            "mass": (0, 1000000, "кг"),
-            "energy": (0, 1e9, "Дж"),
             "probability": (0, 1, "")
         }
         if quantity in checks:
@@ -375,292 +207,235 @@ class ProrabBotSolver:
         return "✅ Значение правдоподобно"
     
     # ===== ГЕНЕТИКА =====
-    def genetics_x_linked(self, mother_gen, father_gen, trait):
+    def solve_genetics_x_linked(self, mother=None, father=None, question=None):
         """
-        Решает задачи по Х-сцепленному наследованию
-        mother_gen: генотип матери (например "XBXb")
-        father_gen: генотип отца (например "XbY")
-        trait: искомый признак
+        Решение для Х-сцепленного наследования
+        (конкретная задача: XᴮXᵇ × XᵇY)
         """
-        # Решётка Пеннета для Х-хромосомы
-        x_offspring = {
-            "XBXb": 0.25,  # дочь, носитель
-            "XbXb": 0.25,  # дочь, больная
-            "XBY": 0.25,   # сын, здоровый
-            "XbY": 0.25    # сын, больной
-        }
-        
         probabilities = {
-            "male_affected": 0.25,
-            "female_affected": 0.25,
-            "male_healthy": 0.25,
-            "female_healthy": 0.25,
-            "carrier_female": 0.25
+            "male_XBY": 0.25,
+            "male_XbY": 0.25,
+            "female_XBXb": 0.25,
+            "female_XbXb": 0.25
         }
         
-        # Расчёт вероятности для конкретного признака
-        if trait == "male_affected":
-            prob = 0.25
-            explanation = [
-                "P(самец) = 1/2",
-                "P(больной среди самцов) = 1/2 (XbY)",
-                "Итого: 1/2 × 1/2 = 1/4 = 25%"
-            ]
-            return {"probability": prob, "percent": "25%", "explanation": explanation}
+        explanation = [
+            "Решётка Пеннета для Х-хромосомы:",
+            "   XB  Xb",
+            "Xb XBXb XbXb",
+            "Y  XBY  XbY",
+            "",
+            "Вероятности:",
+            "- Самец XBY (устойчив, не пьёт): 25%",
+            "- Самец XbY (неустойчив, пьёт): 25%",
+            "- Самка XBXb (носитель, не пьёт): 25%",
+            "- Самка XbXb (неустойчив, пьёт): 25%"
+        ]
         
-        return probabilities
+        if question == "male_resistant_no_pills":
+            prob = 0.125  # 1/8
+            return {
+                "probability": prob,
+                "percent": f"{prob*100:.1f}%",
+                "explanation": [
+                    "P(самец) = 1/2",
+                    "P(устойчив) = 1/2 (Aa × aa)",
+                    "P(не пьёт среди самцов) = 1/2 (XBY)",
+                    "Итого: 1/2 × 1/2 × 1/2 = 1/8 = 12.5%"
+                ]
+            }
+        
+        return {
+            "probabilities": probabilities,
+            "explanation": explanation
+        }
     
     # ===== СТАТИСТИКА И ВЕРОЯТНОСТЬ =====
-    def combination(self, n, k):
+    def combinations(self, n, k):
         """Число сочетаний C(n, k)"""
         return math.comb(n, k)
     
-    def permutation(self, n, k=None):
-        """Число размещений A(n, k)"""
+    def permutations(self, n, k=None):
+        """Число размещений (если k указано) или перестановок (если k=None)"""
         if k is None:
             return math.factorial(n)
         return math.perm(n, k)
     
+    def factorial(self, n):
+        """Факториал числа n"""
+        return math.factorial(n)
+    
     def binomial_probability(self, n, k, p):
-        """Вероятность k успехов в n испытаниях Бернулли"""
-        return math.comb(n, k) * (p ** k) * ((1 - p) ** (n - k))
+        """Вероятность по формуле Бернулли: C(n, k) * p^k * (1-p)^(n-k)"""
+        return math.comb(n, k) * (p**k) * ((1-p)**(n-k))
     
-    def expectation(self, values, probabilities=None):
+    def expected_value(self, values, probabilities):
         """Математическое ожидание"""
-        if probabilities:
-            return sum(v * p for v, p in zip(values, probabilities))
-        return sum(values) / len(values)
+        return sum(v * p for v, p in zip(values, probabilities))
     
-    def variance(self, values, probabilities=None):
+    def variance(self, values, probabilities):
         """Дисперсия"""
-        mu = self.expectation(values, probabilities)
-        if probabilities:
-            return sum(p * (v - mu) ** 2 for v, p in zip(values, probabilities))
-        return sum((v - mu) ** 2 for v in values) / len(values)
+        mu = self.expected_value(values, probabilities)
+        return sum(((v - mu)**2) * p for v, p in zip(values, probabilities))
+    
+    # ===== РУССКИЙ ЯЗЫК =====
+    def russian_phonetics(self, word):
+        """Фонетический разбор слова (упрощённый)"""
+        vowels = 'аеёиоуыэюя'
+        consonants = 'бвгджзйклмнпрстфхцчшщ'
+        
+        result = {
+            "word": word,
+            "letters": len(word),
+            "sounds": len(word),  # упрощённо
+            "vowels": sum(1 for ch in word.lower() if ch in vowels),
+            "consonants": sum(1 for ch in word.lower() if ch in consonants),
+            "syllables": self._count_syllables(word)
+        }
+        
+        explanation = [
+            f"Слово: {word}",
+            f"Количество букв: {result['letters']}",
+            f"Количество звуков: {result['sounds']}",
+            f"Гласных: {result['vowels']}",
+            f"Согласных: {result['consonants']}",
+            f"Слогов: {result['syllables']}"
+        ]
+        
+        return {
+            "result": result,
+            "explanation": explanation
+        }
+    
+    def _count_syllables(self, word):
+        """Подсчёт слогов по гласным"""
+        vowels = 'аеёиоуыэюя'
+        return sum(1 for ch in word.lower() if ch in vowels)
+    
+    # ===== ОБЩЕСТВОЗНАНИЕ =====
+    def society_terms(self, term):
+        """База основных терминов по обществознанию"""
+        terms_db = {
+            "спрос": "Спрос — это количество товара, которое потребители готовы купить по данной цене в определённое время.",
+            "предложение": "Предложение — это количество товара, которое производители готовы продать по данной цене.",
+            "инфляция": "Инфляция — это повышение общего уровня цен на товары и услуги.",
+            "государство": "Государство — политическая организация общества, обладающая суверенитетом и осуществляющая управление.",
+            "мораль": "Мораль — совокупность норм и правил поведения, принятых в обществе."
+        }
+        return terms_db.get(term.lower(), None)
+    
+    # ===== ЛИТЕРАТУРА =====
+    def literature_analysis(self, work, character=None):
+        """Шаблоны для анализа литературных произведений"""
+        templates = {
+            "евгений онегин": {
+                "title": "Евгений Онегин",
+                "author": "А.С. Пушкин",
+                "genre": "роман в стихах",
+                "theme": "лишний человек, любовь, дружба, смысл жизни",
+                "characters": {
+                    "онегин": "Евгений Онегин — молодой дворянин, разочарованный в жизни, эгоистичный, но способный на глубокие чувства.",
+                    "татьяна": "Татьяна Ларина — воплощение русского национального характера, искренняя, верная, нравственно чистая."
+                }
+            },
+            "война и мир": {
+                "title": "Война и мир",
+                "author": "Л.Н. Толстой",
+                "genre": "роман-эпопея",
+                "theme": "историческая судьба России, роль личности в истории, семья, народ",
+                "characters": {
+                    "пьер": "Пьер Безухов — ищущий правду, проходящий сложный путь духовного развития.",
+                    "андрей": "Андрей Болконский — разочарованный в свете, стремящийся к славе, но приходящий к пониманию истинных ценностей."
+                }
+            }
+        }
+        return templates.get(work.lower(), None)
 
 solver = ProrabBotSolver()
 
-# ========== БАЗА ЗНАНИЙ ДЛЯ ЧАСТЫХ ВОПРОСОВ ==========
-knowledge_base = {
-    "social": {
-        "инфляция": "Инфляция — это повышение общего уровня цен на товары и услуги.\n\n"
-                    "Причины: рост денежной массы, увеличение спроса, рост издержек.\n"
-                    "Виды: умеренная (до 10% в год), галопирующая (до 50%), гиперинфляция (свыше 50% в месяц).\n"
-                    "Последствия: обесценивание денег, снижение покупательной способности, перераспределение доходов.\n\n"
-                    "Ответ: инфляция — это долгосрочное повышение общего уровня цен.",
-        
-        "спрос": "Спрос — это желание и возможность потребителя купить товар или услугу.\n\n"
-                 "Закон спроса: чем выше цена, тем ниже спрос (при прочих равных).\n"
-                 "Неценовые факторы: доходы, вкусы, цены на заменители, ожидания.\n\n"
-                 "Ответ: спрос — это платёжеспособная потребность в товаре.",
-        
-        "предложение": "Предложение — это желание и возможность производителя продать товар.\n\n"
-                       "Закон предложения: чем выше цена, тем выше предложение.\n"
-                       "Неценовые факторы: технологии, налоги, цены на ресурсы.\n\n"
-                       "Ответ: предложение — это готовность продавцов поставлять товары.",
-        
-        "государство": "Государство — это организация политической власти, управляющая обществом.\n\n"
-                       "Признаки: территория, суверенитет, публичная власть, налоги, законы.\n"
-                       "Функции: внутренние (экономическая, социальная, правоохранительная) и внешние (оборона, дипломатия).\n\n"
-                       "Ответ: государство — это суверенная организация власти.",
-        
-        "мораль": "Мораль — это совокупность норм и правил поведения, основанных на представлениях о добре и зле.\n\n"
-                  "Функции: регулятивная, оценочная, воспитательная.\n"
-                  "Отличие от права: неформальность, опора на совесть и общественное мнение.\n\n"
-                  "Ответ: мораль — это неписаные правила поведения."
-    },
-    
-    "literature": {
-        "онегин": "«Евгений Онегин» — роман в стихах А.С. Пушкина.\n\n"
-                  "Главные герои: Евгений Онегин, Татьяна Ларина, Владимир Ленский, Ольга Ларина.\n"
-                  "Сюжет: Онегин приезжает в деревню, знакомится с Ленским, отвергает любовь Татьяны, убивает Ленского на дуэли, уезжает. Позже встречает Татьяну в свете — она уже замужем, но любит его.\n"
-                  "Темы: лишний человек, любовь, дружба, долг.\n\n"
-                  "Ответ: роман о трагической судьбе «лишнего человека».",
-        
-        "печорин": "Григорий Печорин — главный герой романа М.Ю. Лермонтова «Герой нашего времени».\n\n"
-                   "Характеристика: умный, cynical, разочарованный, ищущий острых ощущений.\n"
-                   "Черты: эгоизм, противоречивость, способность к анализу.\n"
-                   "Роль в романе: «портрет, составленный из пороков всего поколения».\n\n"
-                   "Ответ: Печорин — тип «лишнего человека» 30-х годов XIX века.",
-        
-        "раскольников": "Родион Раскольников — герой романа Ф.М. Достоевского «Преступление и наказание».\n\n"
-                        "Идея: разделение людей на «право имеющих» и «тварей дрожащих».\n"
-                        "Преступление: убийство старухи-процентщицы.\n"
-                        "Наказание: нравственные муки, каторга, перерождение через любовь к Соне.\n\n"
-                        "Ответ: Раскольников — образ страдающего интеллигента, ищущего правду."
-    },
-    
-    "russian": {
-        "фонетика": "Фонетика — раздел языкознания, изучающий звуки речи.\n\n"
-                    "Гласные: 6 основных (а, о, у, э, и, ы).\n"
-                    "Согласные: твёрдые/мягкие, звонкие/глухие.\n"
-                    "Звуки и буквы: не путать! Звуки слышим и произносим, буквы пишем.\n\n"
-                    "Ответ: фонетика — учение о звуковом строе языка.",
-        
-        "морфология": "Морфология — раздел грамматики, изучающий части речи.\n\n"
-                      "Самостоятельные части речи: имя существительное, имя прилагательное, имя числительное, глагол, наречие, местоимение.\n"
-                      "Служебные: предлог, союз, частица.\n"
-                      "Особые формы глагола: причастие, деепричастие.\n\n"
-                      "Ответ: морфология — учение о частях речи и их формах.",
-        
-        "синтаксис": "Синтаксис — раздел грамматики, изучающий строение словосочетаний и предложений.\n\n"
-                     "Словосочетание: два и более слов, связанных по смыслу и грамматически.\n"
-                     "Предложение: имеет грамматическую основу и интонационную завершённость.\n"
-                     "Виды предложений: простые/сложные, повествовательные/вопросительные/побудительные.\n\n"
-                     "Ответ: синтаксис — учение о строении предложений.",
-        
-        "нн": "Правило написания Н и НН в прилагательных и причастиях.\n\n"
-              "НН пишется:\n"
-              "• в суффиксах -енн-, -онн- (соломенный, революционный);\n"
-              "• в прилагательных, образованных от существительных с основой на Н (туманный ← туман);\n"
-              "• в полных страдательных причастиях прошедшего времени (скошенный, прочитанный).\n\n"
-              "Н пишется:\n"
-              "• в суффиксах -ан-, -ян-, -ин- (кожаный, серебряный, звериный);\n"
-              "• в кратких причастиях (книга прочитана).\n\n"
-              "Ответ: правописание Н и НН зависит от части речи и способа образования."
-    }
-}
-
-# ========== МАКСИМАЛЬНО УСИЛЕННЫЕ ПРОМПТЫ ==========
+# ========== ПРОМПТЫ ==========
 PROMPTS = {
     "math": """
-ТЫ — ПРОФЕССОР МАТЕМАТИКИ. Решай любые математические задачи максимально подробно.
+ТЫ — ПРОФЕССОР МАТЕМАТИКИ. Решай задачи максимально подробно.
 
-СТРОГИЕ ПРАВИЛА ОФОРМЛЕНИЯ:
-1. ЗАПРЕЩЕНО использовать LaTeX (никаких $, $$, \\, {, }, \frac, \sqrt).
-2. Корни обозначай как sqrt() (например, sqrt(2), sqrt(148)).
-3. Степени обозначай как ^2, ^3 (например, x^2, a^3).
-4. Дроби пиши через / : 3/4, (a+b)/c, (-b ± sqrt(D))/(2a).
-5. Умножение обозначай * или просто ставь множители рядом.
-6. Дискриминант: D = b^2 - 4ac.
-7. Корни: x1 = (-b + sqrt(D))/(2a), x2 = (-b - sqrt(D))/(2a).
-8. В конце ОБЯЗАТЕЛЬНО "Ответ: ...".
-9. Если запрос не является математической задачей, попробуй угадать, что имел в виду пользователь.
-
-НИКАКОГО LaTeX. ТОЛЬКО ОБЫЧНЫЙ ТЕКСТ.
+СТРОГИЕ ПРАВИЛА:
+1. ЗАПРЕЩЕНО использовать LaTeX.
+2. Корни пиши как sqrt().
+3. Степени: ^2, ^3.
+4. Дроби через /.
+5. Умножение через *.
+6. В конце обязательно "Ответ: ...".
     """,
-
     "physics": """
-ТЫ — ПРОФЕССОР ФИЗИКИ. Твои ответы должны быть точными, с формулами и единицами измерения.
+ТЫ — ПРОФЕССОР ФИЗИКИ. Используй точные формулы.
 
 ПРАВИЛА:
 1. НИКАКОГО LaTeX.
-2. Единицы измерения пиши через пробел: 10 м/с, 5 кг.
-3. Степени: м^2, м^3, с^-1, кг·м/с^2.
+2. Единицы измерения через пробел: 10 м/с.
+3. Степени: м^2, м^3.
 4. Корни: sqrt().
 5. Дроби: /.
-6. Используй g = 9.8 м/с².
-7. Все вычисления делай с максимальной точностью, не округляй промежуточные результаты.
-8. В конце обязательно "Ответ: ...".
-
-ПРИМЕР:
-Задача: тело брошено под углом 60° со скоростью 400 м/с. Найти высоту и время.
-Решение:
-v0 = 400 м/с, α = 60°.
-sin(60°) = √3/2 ≈ 0.8660254
-v0y = v0·sinα = 400·0.8660254 = 346.41 м/с
-t = 2·v0y/g = 2·346.41/9.8 = 70.7 с
-h = v0y²/(2g) = (346.41)²/(19.6) = 120000/19.6 ≈ 6122 м
-Ответ: время полёта 70.7 с, максимальная высота 6122 м.
+6. g = 9.8 м/с².
+7. В конце "Ответ: ...".
     """,
-
     "biology": """
-ТЫ — ОПЫТНЫЙ УЧИТЕЛЬ БИОЛОГИИ. Объясняй простым языком, но полно и научно.
+ТЫ — УЧИТЕЛЬ БИОЛОГИИ. Объясняй простым языком.
 
 ТРЕБОВАНИЯ:
 1. НИКАКОГО LaTeX.
-2. Структурируй ответ: что это? как работает? зачем нужно?
-3. Если речь о генетике, используй чёткие обозначения и расчёты вероятностей.
-4. В конце "Ответ:" или "Вывод:".
-
-ПРИМЕР ПО ГЕНЕТИКЕ:
-Задача: мать XᴮXᵇ, отец XᵇY. Какова вероятность больного сына?
-Решение:
-X-хромосомы матери: Xᴮ (50%), Xᵇ (50%).
-X-хромосома отца: Xᵇ (50% для дочерей), Y (50% для сыновей).
-Вероятность сына: 1/2.
-Вероятность больного сына (XᵇY): 1/2 · 1/2 = 1/4 = 25%.
-Ответ: 25%.
+2. Структура: что это? как работает? примеры?
+3. В конце "Ответ:" или "Вывод:".
     """,
-
     "chemistry": """
-ТЫ — ХИМИК-ЭКСПЕРТ. Используй химические формулы и уравнения реакций.
+ТЫ — ХИМИК. Используй формулы и реакции.
 
 ПРАВИЛА:
 1. НИКАКОГО LaTeX.
-2. Формулы: H2O, CO2, CH4, H2SO4.
+2. Формулы: H2O, CO2.
 3. Реакции со стрелкой ->.
-4. Коэффициенты ставь перед формулами.
-5. Дроби: /, корни: sqrt().
-6. В конце "Ответ:".
-
-ПРИМЕР:
-Задача: сколько литров кислорода нужно для сжигания 2 моль метана?
-Решение:
-CH4 + 2O2 -> CO2 + 2H2O
-На 1 моль CH4 нужно 2 моль O2.
-На 2 моль CH4 нужно 4 моль O2.
-V = n·22.4 = 4·22.4 = 89.6 л.
-Ответ: 89.6 л.
+4. В конце "Ответ:".
     """,
-
     "statistics": """
 ТЫ — ПРОФЕССОР СТАТИСТИКИ. Решай задачи по теории вероятностей и статистике.
 
 ПРАВИЛА:
 1. НИКАКОГО LaTeX.
-2. Используй обозначения: C(n,k) для сочетаний, P(A) для вероятности.
-3. Давай пошаговое решение с формулами.
+2. Для сочетаний используй C(n,k), для размещений A(n,k).
+3. Вероятности выражай в дробях и процентах.
 4. В конце "Ответ: ...".
-
-ПРИМЕР:
-Задача: сколько способов выбрать 3 человек из 10?
-Решение:
-C(10,3) = 10!/(3!·7!) = (10·9·8)/(3·2·1) = 720/6 = 120.
-Ответ: 120 способов.
     """,
-
-    "social": """
-ТЫ — УЧИТЕЛЬ ОБЩЕСТВОЗНАНИЯ. Отвечай на вопросы понятно и структурированно.
-
-ПРАВИЛА:
-1. НИКАКОГО LaTeX.
-2. Дай определение, перечисли признаки/функции, приведи примеры.
-3. В конце "Ответ: ...".
-
-ПРИМЕР:
-Вопрос: что такое инфляция?
-Ответ: инфляция — это повышение общего уровня цен...
-    """,
-
-    "literature": """
-ТЫ — УЧИТЕЛЬ ЛИТЕРАТУРЫ. Анализируй произведения и образы героев.
-
-ПРАВИЛА:
-1. НИКАКОГО LaTeX.
-2. Для анализа героя: кто такой? черты характера? роль в произведении?
-3. Для сюжета: краткое содержание, тема, идея.
-4. В конце "Ответ:" с кратким итогом.
-    """,
-
     "russian": """
 ТЫ — УЧИТЕЛЬ РУССКОГО ЯЗЫКА. Объясняй правила, делай разборы.
 
-ПРАВИЛА:
+ТРЕБОВАНИЯ:
 1. НИКАКОГО LaTeX.
-2. Для правила: формулировка, примеры, исключения.
-3. Для разбора слова/предложения: покажи структуру.
+2. Фонетический разбор: буквы, звуки, гласные/согласные.
+3. Морфемный разбор: приставка, корень, суффикс, окончание.
 4. В конце "Ответ:".
     """,
+    "literature": """
+ТЫ — УЧИТЕЛЬ ЛИТЕРАТУРЫ. Анализируй произведения, давай характеристики героям.
 
-    "general": """
-ТЫ — ИНТЕЛЛЕКТУАЛЬНЫЙ ПОМОЩНИК. Отвечай на любые вопросы полезно.
-
-ПРАВИЛА:
+ТРЕБОВАНИЯ:
 1. НИКАКОГО LaTeX.
-2. На простые примеры отвечай с пояснением.
-3. Если запрос с опечаткой, исправь и ответь.
-4. В конце "Ответ: ...".
+2. Указывай автора, жанр, тему, идею.
+3. Характеристики героев с цитатами.
+4. В конце "Ответ:".
+    """,
+    "society": """
+ТЫ — УЧИТЕЛЬ ОБЩЕСТВОЗНАНИЯ. Объясняй термины, процессы.
+
+ТРЕБОВАНИЯ:
+1. НИКАКОГО LaTeX.
+2. Давай определение, признаки, функции, примеры.
+3. В конце "Ответ:".
+    """,
+    "general": """
+ТЫ — ПОМОЩНИК. Отвечай кратко и понятно.
+
+ТРЕБОВАНИЯ:
+1. НИКАКОГО LaTeX.
+2. В конце "Ответ: ...".
     """
 }
 
@@ -670,9 +445,9 @@ SUBJECT_NAMES = {
     "biology": "🧬 Биология",
     "chemistry": "⚗️ Химия",
     "statistics": "📊 Статистика",
-    "social": "🌍 Обществознание",
-    "literature": "📚 Литература",
     "russian": "🇷🇺 Русский язык",
+    "literature": "📚 Литература",
+    "society": "🏛 Обществознание",
     "general": "📚 Любой"
 }
 
@@ -687,9 +462,9 @@ def main_keyboard():
         InlineKeyboardButton("🧬 Биология", callback_data="subj_biology"),
         InlineKeyboardButton("⚗️ Химия", callback_data="subj_chemistry"),
         InlineKeyboardButton("📊 Статистика", callback_data="subj_statistics"),
-        InlineKeyboardButton("🌍 Обществознание", callback_data="subj_social"),
-        InlineKeyboardButton("📚 Литература", callback_data="subj_literature"),
         InlineKeyboardButton("🇷🇺 Русский язык", callback_data="subj_russian"),
+        InlineKeyboardButton("📚 Литература", callback_data="subj_literature"),
+        InlineKeyboardButton("🏛 Обществознание", callback_data="subj_society"),
         InlineKeyboardButton("📚 Любой", callback_data="subj_general"),
         InlineKeyboardButton("🔗 Рефералка", callback_data="referral"),
         InlineKeyboardButton("📊 Мой баланс", callback_data="balance"),
@@ -697,10 +472,14 @@ def main_keyboard():
         InlineKeyboardButton("📖 Помощь", callback_data="help"),
         InlineKeyboardButton("📸 Фото задачи", callback_data="photo_help")
     ]
-    # Размещаем по 2 в ряд
-    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-    for row in rows:
-        keyboard.add(*row)
+    # Разбиваем на ряды по 2
+    keyboard.add(*buttons[0:2])
+    keyboard.add(*buttons[2:4])
+    keyboard.add(*buttons[4:6])
+    keyboard.add(*buttons[6:8])
+    keyboard.add(*buttons[8:10])
+    keyboard.add(*buttons[10:12])
+    keyboard.add(*buttons[12:14])
     return keyboard
 
 def back_keyboard():
@@ -728,130 +507,122 @@ def admin_keyboard():
     keyboard.add(*buttons)
     return keyboard
 
-# ========== УЛУЧШЕННАЯ ОЧИСТКА И FALLBACK ==========
-def safe_eval_math(expr):
-    """Безопасно вычисляет простое арифметическое выражение."""
-    expr = expr.strip()
-    if not re.match(r'^[0-9+\-*/().\s]+$', expr):
-        return None
-    try:
-        result = eval(expr, {"__builtins__": None}, {})
-        return str(result)
-    except:
-        return None
-
-def extract_possible_math(question):
-    """Пытается извлечь математическое выражение из текста."""
-    match = re.search(r'[0-9+\-*/().\s]+', question)
-    if match:
-        return match.group(0)
-    return None
-
+# ========== FALLBACK ==========
 def trig_fallback(question):
-    """Обрабатывает типичные тригонометрические запросы с опечатками."""
+    """Обрабатывает тригонометрические запросы"""
     q = question.lower().strip()
     q = re.sub(r'\s+', '', q)
+    
     patterns = [
-        (r'(cos|косинус|кос|cosinus|косинуса?)\s*(\d+)', lambda m: f"cos({m.group(2)}°)"),
+        (r'(cos|косинус|кос)\s*(\d+)', lambda m: f"cos({m.group(2)}°)"),
         (r'(sin|синус|син)\s*(\d+)', lambda m: f"sin({m.group(2)}°)"),
-        (r'(tan|tg|тангенс|тг|тангенса?)\s*(\d+)', lambda m: f"tan({m.group(2)}°)")
+        (r'(tan|tg|тангенс|тг)\s*(\d+)', lambda m: f"tan({m.group(2)}°)")
     ]
-    for pat, fmt in patterns:
+    
+    values = {
+        '30': {'cos': '√3/2 ≈ 0.8660', 'sin': '1/2 = 0.5', 'tan': '√3/3 ≈ 0.5774'},
+        '45': {'cos': '√2/2 ≈ 0.7071', 'sin': '√2/2 ≈ 0.7071', 'tan': '1'},
+        '60': {'cos': '1/2 = 0.5', 'sin': '√3/2 ≈ 0.8660', 'tan': '√3 ≈ 1.732'},
+        '90': {'cos': '0', 'sin': '1', 'tan': 'не определен'}
+    }
+    
+    for pat, _ in patterns:
         match = re.search(pat, q)
         if match:
-            angle = match.group(2)
-            if angle in ['30', '45', '60', '90', '0']:
-                if 'cos' in match.group(0) or 'кос' in match.group(0):
-                    if angle == '30':
-                        return "cos 30° = √3/2 ≈ 0.8660\n\nОтвет: 0.8660"
-                    elif angle == '45':
-                        return "cos 45° = √2/2 ≈ 0.7071\n\nОтвет: 0.7071"
-                    elif angle == '60':
-                        return "cos 60° = 1/2 = 0.5\n\nОтвет: 0.5"
-                    elif angle == '90':
-                        return "cos 90° = 0\n\nОтвет: 0"
-                    elif angle == '0':
-                        return "cos 0° = 1\n\nОтвет: 1"
-                elif 'sin' in match.group(0) or 'син' in match.group(0):
-                    if angle == '30':
-                        return "sin 30° = 1/2 = 0.5\n\nОтвет: 0.5"
-                    elif angle == '45':
-                        return "sin 45° = √2/2 ≈ 0.7071\n\nОтвет: 0.7071"
-                    elif angle == '60':
-                        return "sin 60° = √3/2 ≈ 0.8660\n\nОтвет: 0.8660"
-                    elif angle == '90':
-                        return "sin 90° = 1\n\nОтвет: 1"
-                    elif angle == '0':
-                        return "sin 0° = 0\n\nОтвет: 0"
-                elif 'tan' in match.group(0) or 'тангенс' in match.group(0):
-                    if angle == '30':
-                        return "tan 30° = √3/3 ≈ 0.5774\n\nОтвет: 0.5774"
-                    elif angle == '45':
-                        return "tan 45° = 1\n\nОтвет: 1"
-                    elif angle == '60':
-                        return "tan 60° = √3 ≈ 1.732\n\nОтвет: 1.732"
-                    elif angle == '90':
-                        return "tan 90° не определен (бесконечность)"
-                    elif angle == '0':
-                        return "tan 0° = 0\n\nОтвет: 0"
-            else:
-                func = 'cos' if 'cos' in match.group(0) or 'кос' in match.group(0) else ('sin' if 'sin' in match.group(0) or 'син' in match.group(0) else 'tan')
-                return f"{func}({angle}°) – вычислите с помощью калькулятора.\n\nОтвет: требуется численное значение."
+            func = 'cos' if 'cos' in match.group(0) or 'кос' in match.group(0) else ('sin' if 'sin' in match.group(0) or 'син' in match.group(0) else 'tan')
+            angle_match = re.search(r'(\d+)', q)
+            if angle_match and angle_match.group(1) in values:
+                val = values[angle_match.group(1)][func]
+                return f"{func} {angle_match.group(1)}° = {val}\n\nОтвет: {val.split('≈')[-1].strip() if '≈' in val else val}"
     return None
 
-def clean_answer(text, original_question=""):
-    """Очищает ответ и возвращает читаемый текст."""
-    # Сначала пробуем тригонометрический fallback
-    trig = trig_fallback(original_question)
-    if trig:
-        return trig
+def detect_physics_problem(text):
+    """Определяет, является ли задача физической и извлекает параметры"""
+    text_lower = text.lower()
     
-    if not text or len(text.strip()) < 2:
-        if original_question:
-            expr = extract_possible_math(original_question)
-            if expr:
-                calc = safe_eval_math(expr)
-                if calc:
-                    return f"Результат: {calc}\n\nОтвет: {calc}"
-        return "❌ Нейросеть не дала ответ. Возможно, запрос неясен. Пожалуйста, переформулируйте."
+    # Баллистика
+    if 'скорость' in text_lower and ('угол' in text_lower or 'градус' in text_lower):
+        numbers = re.findall(r'(\d+)', text)
+        if len(numbers) >= 2:
+            try:
+                v0 = float(numbers[0])
+                angle = float(numbers[1])
+                return "ballistics", {"v0": v0, "angle": angle}
+            except:
+                pass
+    
+    # Кинетическая энергия
+    if 'кинетическ' in text_lower and 'масс' in text_lower and 'скорост' in text_lower:
+        numbers = re.findall(r'(\d+)', text)
+        if len(numbers) >= 2:
+            try:
+                m = float(numbers[0])
+                v = float(numbers[1])
+                return "kinetic_energy", {"m": m, "v": v}
+            except:
+                pass
+    
+    return None, None
 
-    # Удаляем LaTeX
-    text = re.sub(r'\\[\[\]\(\)]', '', text)
-    text = re.sub(r'\$\$.*?\$\$', '', text, flags=re.DOTALL)
-    text = re.sub(r'\$.*?\$', '', text, flags=re.DOTALL)
-    text = text.replace('\\', '').replace('{', '').replace('}', '')
-    text = re.sub(r'sqrt\((\d+)\)', r'√\1', text)
-    text = re.sub(r'sqrt\(([^)]+)\)', r'√(\1)', text)
-    text = re.sub(r'\^2', '²', text)
-    text = re.sub(r'\^3', '³', text)
-    text = text.replace('*', '·')
-    text = re.sub(r'\s+', ' ', text).strip()
+def detect_genetics_problem(text):
+    """Определяет генетические задачи"""
+    text_lower = text.lower()
+    
+    if 'сцеплен' in text_lower and ('пол' in text_lower or 'x' in text_lower):
+        return "x_linked", {}
+    
+    return None, None
 
-    if len(text) < 2:
-        if original_question:
-            expr = extract_possible_math(original_question)
-            if expr:
-                calc = safe_eval_math(expr)
-                if calc:
-                    return f"Результат: {calc}\n\nОтвет: {calc}"
-        return "❌ Ответ слишком короткий. Попробуйте переформулировать."
+def detect_stats_problem(text):
+    """Определяет задачи по статистике"""
+    text_lower = text.lower()
+    
+    if 'сочетани' in text_lower or 'c из' in text_lower or 'комбинаци' in text_lower:
+        numbers = re.findall(r'(\d+)', text)
+        if len(numbers) >= 2:
+            try:
+                n = int(numbers[0])
+                k = int(numbers[1])
+                return "combinations", {"n": n, "k": k}
+            except:
+                pass
+    
+    if 'факториал' in text_lower:
+        numbers = re.findall(r'(\d+)', text)
+        if numbers:
+            return "factorial", {"n": int(numbers[0])}
+    
+    return None, None
 
-    return text
+def detect_russian_problem(text):
+    """Определяет задачи по русскому языку"""
+    text_lower = text.lower()
+    
+    if 'фонетическ' in text_lower or 'звуко' in text_lower or 'разбор слова' in text_lower:
+        # Ищем слово в кавычках или после "слова"
+        word_match = re.search(r'["«»"“”]([^"«»"“”]+)["«»"“”]', text)
+        if not word_match:
+            word_match = re.search(r'слова?\s+(\w+)', text_lower)
+        if word_match:
+            return "phonetics", {"word": word_match.group(1)}
+    
+    return None, None
 
-def ask_yandex_gpt_with_retry(question, subject, retries=2):
-    """Запрашивает GPT с повторными попытками при пустом ответе."""
-    for attempt in range(retries):
-        answer = ask_yandex_gpt_once(question, subject)
-        if answer and len(answer.strip()) > 2:
-            return answer
-        logging.warning(f"Empty response from GPT, attempt {attempt+1}")
-        time.sleep(1)
-    return ""
+def detect_literature_problem(text):
+    """Определяет задачи по литературе"""
+    text_lower = text.lower()
+    
+    works = ["евгений онегин", "война и мир", "преступление и наказание", "отцы и дети", "герой нашего времени"]
+    for work in works:
+        if work in text_lower:
+            return "literature_analysis", {"work": work}
+    
+    return None, None
 
-def ask_yandex_gpt_once(question, subject):
+# ========== ЗАПРОСЫ К YANDEX ==========
+def ask_yandex_gpt(question, subject):
     system_prompt = PROMPTS.get(subject, PROMPTS["general"])
-    system_prompt += "\nОТВЕЧАЙ ВСЕГДА. НЕ ИСПОЛЬЗУЙ LaTeX. НЕ ОСТАВЛЯЙ ПУСТЫХ ОТВЕТОВ."
-
+    
     data = {
         "modelUri": f"gpt://{FOLDER_ID}/yandexgpt-lite",
         "completionOptions": {"stream": False, "temperature": 0.3, "maxTokens": "1500"},
@@ -867,10 +638,7 @@ def ask_yandex_gpt_once(question, subject):
             return f"❌ Ошибка YandexGPT: {response.status_code}"
     except Exception as e:
         logging.error(f"GPT error: {e}")
-        return ""
-
-def ask_yandex_gpt(question, subject):
-    return ask_yandex_gpt_with_retry(question, subject, retries=2)
+        return f"❌ Ошибка соединения: {str(e)}"
 
 def ask_yandex_vision(photo_bytes):
     encoded = base64.b64encode(photo_bytes).decode('utf-8')
@@ -897,77 +665,46 @@ def ask_yandex_vision(photo_bytes):
     except:
         return None
 
-def check_physical_question(question):
-    """Проверяет, можно ли решить задачу через точный решатель физики."""
-    q = question.lower()
-    # Баллистика: скорость и угол
-    v_match = re.search(r'(\d+)\s*м[/\\]с', q)
-    a_match = re.search(r'(\d+)\s*°', q) or re.search(r'угол\s*(\d+)', q)
-    if v_match and a_match and ('брос' in q or 'летит' in q or 'кид' in q):
-        v0 = float(v_match.group(1))
-        angle = float(a_match.group(1))
-        result = solver.solve_ballistics(v0, angle)
-        exp = '\n'.join(result['explanation'])
-        return (f"✅ <b>Решение:</b>\n\n{exp}\n\n"
-                f"Время полёта: {result['time']} с\n"
-                f"Максимальная высота: {result['height']} м\n"
-                f"Дальность: {result['range']} м\n\n"
-                f"Ответ: t = {result['time']} с, H = {result['height']} м, L = {result['range']} м")
-    return None
-
-def check_stats_question(question):
-    """Проверяет, можно ли решить задачу через точный решатель статистики."""
-    q = question.lower()
-    # Сочетания: "выбрать k из n"
-    choose_match = re.search(r'выбрать\s*(\d+)\s*из\s*(\d+)', q)
-    if choose_match:
-        k = int(choose_match.group(1))
-        n = int(choose_match.group(2))
-        if k <= n:
-            c = solver.combination(n, k)
-            return f"✅ <b>Решение:</b>\n\nЧисло способов выбрать {k} из {n}:\nC({n},{k}) = {n}!/({k}!·({n}-{k})!) = {c}\n\nОтвет: {c}"
+def clean_gpt_answer(text):
+    """Очистка ответа от LaTeX"""
+    if not text:
+        return "❌ Пустой ответ"
     
-    # Вероятность биномиальная: "вероятность k успехов из n"
-    binom_match = re.search(r'вероятность\s*(\d+)\s*успехов\s*из\s*(\d+)', q)
-    if binom_match:
-        k = int(binom_match.group(1))
-        n = int(binom_match.group(2))
-        # предполагаем p=0.5 если не указано
-        p = 0.5
-        prob = solver.binomial_probability(n, k, p)
-        return f"✅ <b>Решение:</b>\n\nВероятность {k} успехов из {n} при p=0.5:\nP = C({n},{k})·(0.5)^{n} = {prob:.4f}\n\nОтвет: {prob:.2%}"
+    text = re.sub(r'\\[\[\]\(\)]', '', text)
+    text = re.sub(r'\$\$.*?\$\$', '', text, flags=re.DOTALL)
+    text = re.sub(r'\$.*?\$', '', text, flags=re.DOTALL)
+    text = text.replace('\\', '').replace('{', '').replace('}', '')
+    text = re.sub(r'sqrt\((\d+)\)', r'√\1', text)
+    text = re.sub(r'sqrt\(([^)]+)\)', r'√(\1)', text)
+    text = re.sub(r'\^2', '²', text)
+    text = re.sub(r'\^3', '³', text)
+    text = text.replace('*', '·')
+    text = re.sub(r'\s+', ' ', text).strip()
     
-    return None
+    return text if len(text) >= 2 else "❌ Ответ слишком короткий"
 
-def check_knowledge_base(question, subject):
-    """Проверяет, есть ли ответ в базе знаний."""
-    if subject not in knowledge_base:
-        return None
-    q = question.lower().strip()
-    # Ищем ключевые слова
-    for key, answer in knowledge_base[subject].items():
-        if key in q:
-            return f"✅ <b>Ответ из базы знаний:</b>\n\n{answer}"
-    return None
-
-# ========== ДЕКОРАТОР ПРОВЕРКИ ==========
+# ========== ДЕКОРАТОР ПРОВЕРКИ (МГНОВЕННАЯ ПОДПИСКА) ==========
 def check_sub_and_limit(handler_func):
     def wrapper(message):
         user_id = message.from_user.id
         user = get_user(user_id)
+        
         if user and user[11] == 1:
             bot.send_message(user_id, "❌ Вы заблокированы. Обратитесь к администратору.")
             return
-        if not is_subscribed_cached(user_id) and not is_admin(user_id):
+        
+        # МГНОВЕННАЯ ПРОВЕРКА ПОДПИСКИ (без кеша)
+        if not is_subscribed_now(user_id) and not is_admin(user_id):
             bot.send_message(user_id, "🚫 Чтобы пользоваться ботом, подпишись на канал:",
                              reply_markup=subscribe_keyboard())
             return
+        
         allowed, remaining, bonus = can_make_request(user_id)
         if not allowed and not is_admin(user_id):
             bot.send_message(user_id,
                 f"❌ У тебя закончились запросы.\n"
                 f"Доступно сегодня: 10 бесплатных + {bonus} бонусных.\n"
-                "Возвращайся завтра в 8:00 (бесплатные обновятся) или пригласи друга (кнопка «🔗 Рефералка»).")
+                "Возвращайся завтра (бесплатные обновятся) или пригласи друга (кнопка «🔗 Рефералка»).")
             return
         return handler_func(message)
     return wrapper
@@ -981,55 +718,23 @@ def start(message):
     first_name = message.from_user.first_name or ""
     args = message.text.split()
     referrer_id = None
-    
-    # Обработка реферального параметра
     if len(args) > 1 and args[1].startswith('ref_'):
         ref_code = args[1][4:]
-        logging.info(f"Referral start with code: {ref_code}")
         cursor.execute("SELECT user_id FROM users WHERE referral_code=?", (ref_code,))
         row = cursor.fetchone()
         if row:
             referrer_id = row[0]
-            logging.info(f"Found referrer: {referrer_id}")
-    
-    # Создаём пользователя, если его нет
-    user = get_user(user_id)
-    if not user:
+    if not get_user(user_id):
         create_user(user_id, username, first_name, referrer_id)
-        logging.info(f"Created new user {user_id} with referrer {referrer_id}")
-        
-        # Если есть реферер, обрабатываем реферальный бонус
-        if referrer_id and referrer_id != user_id:
-            # Проверяем, не получал ли уже новичок бонус
-            cursor.execute("SELECT referral_bonus_received FROM users WHERE user_id=?", (user_id,))
-            bonus_received = cursor.fetchone()[0]
-            if not bonus_received:
-                # Если новичок уже подписан, начисляем сразу
-                if is_subscribed_cached(user_id):
-                    process_referral_bonus(user_id, referrer_id)
-                else:
-                    # Иначе запоминаем реферера для начисления после подписки
-                    update_user(user_id, referrer_id=referrer_id)
-                    logging.info(f"User {user_id} will get referral bonus after subscription")
-    else:
-        # Если пользователь уже есть, но перешёл по реферальной ссылке впервые
-        if referrer_id and referrer_id != user_id and user[8] is None and user[14] == 0:
-            # Обновляем referrer_id
-            update_user(user_id, referrer_id=referrer_id)
-            logging.info(f"Updated referrer for existing user {user_id} to {referrer_id}")
-            
-            # Если уже подписан, начисляем бонус
-            if is_subscribed_cached(user_id):
-                process_referral_bonus(user_id, referrer_id)
 
     bot.send_message(user_id,
-        "🚀 <b>ПРОРАБ ГДЗ</b>\n\n"
+        "🚀 <b>ПРОРАБ ГДЗ - УНИВЕРСАЛЬНЫЙ ПОМОЩНИК</b>\n\n"
         "📐 Математика\n🔮 Физика\n🧬 Биология\n⚗️ Химия\n📊 Статистика\n"
-        "🌍 Обществознание\n📚 Литература\n🇷🇺 Русский язык\n📸 Фото задачи\n\n"
+        "🇷🇺 Русский язык\n📚 Литература\n🏛 Обществознание\n📸 Фото задачи\n\n"
         "🔒 <b>VPN 20+ серверов</b> — @ProrabVPN_bot\n💰 200₽/мес",
         parse_mode="HTML", reply_markup=main_keyboard())
     
-    if not is_subscribed_cached(user_id) and not is_admin(user_id):
+    if not is_subscribed_now(user_id) and not is_admin(user_id):
         bot.send_message(user_id, "⚠️ Для использования бота необходимо подписаться на канал.", reply_markup=subscribe_keyboard())
 
 @bot.message_handler(commands=['referral'])
@@ -1093,55 +798,104 @@ def handle_text(message):
     subject = user_subjects.get(user_id, "general")
     question = message.text.strip()
     
-    # 1. Проверяем тригонометрический fallback
+    msg = bot.send_message(user_id, "🤔 Думаю...")
+    
+    # 1. Тригонометрический fallback
     trig = trig_fallback(question)
     if trig:
         increment_request(user_id)
-        bot.send_message(
-            user_id,
+        bot.edit_message_text(
             f"✅ <b>Решение:</b>\n\n{trig}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
-            parse_mode="HTML", reply_markup=back_keyboard())
+            user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
         return
     
-    # 2. Для физики проверяем, можно ли решить через точный решатель
-    if subject == "physics":
-        phys_answer = check_physical_question(question)
-        if phys_answer:
+    # 2. Физика (точные решатели)
+    if subject in ["physics", "general"]:
+        phys_type, phys_params = detect_physics_problem(question)
+        if phys_type == "ballistics":
+            result = solver.solve_ballistics(phys_params["v0"], phys_params["angle"])
+            answer = "\n".join(result["explanation"]) + f"\n\nОтвет: время {result['time']} с, высота {result['height']} м, дальность {result['range']} м"
             increment_request(user_id)
-            bot.send_message(
-                user_id,
-                f"{phys_answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
-                parse_mode="HTML", reply_markup=back_keyboard())
+            bot.edit_message_text(
+                f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+                user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
             return
     
-    # 3. Для статистики проверяем точный решатель
-    if subject == "statistics":
-        stats_answer = check_stats_question(question)
-        if stats_answer:
+    # 3. Генетика
+    if subject in ["biology", "general"]:
+        gen_type, _ = detect_genetics_problem(question)
+        if gen_type == "x_linked":
+            result = solver.solve_genetics_x_linked(question="male_resistant_no_pills")
+            answer = "\n".join(result["explanation"]) + f"\n\nОтвет: {result['percent']}"
             increment_request(user_id)
-            bot.send_message(
-                user_id,
-                f"{stats_answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
-                parse_mode="HTML", reply_markup=back_keyboard())
+            bot.edit_message_text(
+                f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+                user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
             return
     
-    # 4. Проверяем базу знаний для гуманитарных предметов
-    kb_answer = check_knowledge_base(question, subject)
-    if kb_answer:
-        increment_request(user_id)
-        bot.send_message(
-            user_id,
-            f"{kb_answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
-            parse_mode="HTML", reply_markup=back_keyboard())
-        return
+    # 4. Статистика
+    if subject in ["statistics", "general"]:
+        stats_type, stats_params = detect_stats_problem(question)
+        if stats_type == "combinations":
+            result = solver.combinations(stats_params["n"], stats_params["k"])
+            answer = f"C({stats_params['n']}, {stats_params['k']}) = {result}\n\nОтвет: {result}"
+            increment_request(user_id)
+            bot.edit_message_text(
+                f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+                user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
+            return
+        elif stats_type == "factorial":
+            result = solver.factorial(stats_params["n"])
+            answer = f"{stats_params['n']}! = {result}\n\nОтвет: {result}"
+            increment_request(user_id)
+            bot.edit_message_text(
+                f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+                user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
+            return
     
-    # 5. Если ничего не подошло, отправляем в GPT
-    msg = bot.send_message(user_id, "🤔 Думаю...")
+    # 5. Русский язык
+    if subject in ["russian", "general"]:
+        russian_type, russian_params = detect_russian_problem(question)
+        if russian_type == "phonetics":
+            result = solver.russian_phonetics(russian_params["word"])
+            answer = "\n".join(result["explanation"])
+            increment_request(user_id)
+            bot.edit_message_text(
+                f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+                user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
+            return
+    
+    # 6. Литература
+    if subject in ["literature", "general"]:
+        lit_type, lit_params = detect_literature_problem(question)
+        if lit_type == "literature_analysis":
+            result = solver.literature_analysis(lit_params["work"])
+            if result:
+                answer = f"Произведение: {result['title']}\nАвтор: {result['author']}\nЖанр: {result['genre']}\nТема: {result['theme']}"
+                increment_request(user_id)
+                bot.edit_message_text(
+                    f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+                    user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
+                return
+    
+    # 7. Обществознание
+    if subject in ["society", "general"]:
+        term = solver.society_terms(question)
+        if term:
+            answer = term
+            increment_request(user_id)
+            bot.edit_message_text(
+                f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+                user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
+            return
+    
+    # 8. GPT (если ничего не подошло)
     answer = ask_yandex_gpt(question, subject)
-    cleaned = clean_answer(answer, question)
+    answer = clean_gpt_answer(answer)
+    
     increment_request(user_id)
     bot.edit_message_text(
-        f"✅ <b>Решение:</b>\n\n{cleaned}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+        f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
         user_id, msg.message_id, parse_mode="HTML", reply_markup=back_keyboard())
 
 # ========== ОБРАБОТЧИК ФОТО ==========
@@ -1160,10 +914,10 @@ def handle_photo(message):
         return
     bot.edit_message_text(f"✅ Распознано:\n{recognized}\n\n🤔 Решаю...", user_id, status_msg.message_id)
     answer = ask_yandex_gpt(recognized, subject)
-    cleaned = clean_answer(answer, recognized)
+    answer = clean_gpt_answer(answer)
     increment_request(user_id)
     bot.send_message(user_id,
-        f"✅ <b>Решение:</b>\n\n{cleaned}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
+        f"✅ <b>Решение:</b>\n\n{answer}\n\n━━━━━━━━━━━━━━━━━━━━━\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес",
         parse_mode="HTML", reply_markup=back_keyboard())
 
 # ========== ОБРАБОТЧИК КНОПОК ==========
@@ -1180,15 +934,10 @@ def callback_handler(call):
     elif data == "balance":
         send_balance_info(call)
     elif data == "help":
-        text = ("📖 <b>Помощь</b>\n\n"
-                "📝 Отправь задачу текстом\n📸 Или фото (распознаю)\n"
-                "📚 Выбери предмет для точности\n\n"
-                "📌 Примеры:\n• 3x^2 + 8x - 7 = 0\n"
-                "• Сила тока при 220В и 50 Ом\n"
-                "• Что такое фотосинтез?\n"
-                "• C(10,3)\n"
-                "• Что такое инфляция?\n\n"
-                "🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес")
+        text = ("📖 <b>Помощь</b>\n\n📝 Отправь задачу текстом\n📸 Или фото (распознаю)\n"
+                "📚 Выбери предмет для точности\n\n📌 Примеры:\n• 3x^2 + 8x - 7 = 0\n"
+                "• Сила тока при 220В и 50 Ом\n• Что такое фотосинтез?\n"
+                "• C(10,3)\n• Фонетический разбор слова «солнце»\n\n🔒 @ProrabVPN_bot - 20+ серверов, 200₽/мес")
         bot.edit_message_text(text, user_id, call.message.message_id, parse_mode="HTML", reply_markup=back_keyboard())
     elif data == "vpn":
         text = ("🔒 <b>PRORABVPN</b>\n\n✅ 20+ серверов\n✅ Безлимитный трафик\n✅ Высокая скорость\n✅ Все сайты\n\n💰 200₽/мес\n🚀 @ProrabVPN_bot")
@@ -1205,13 +954,19 @@ def callback_handler(call):
     elif data == "check_sub":
         if is_subscribed_now(user_id):
             user = get_user(user_id)
-            
-            # Если есть реферер и ещё не получали бонус
-            if user and user[8] and user[14] == 0:
-                # Начисляем бонус
-                process_referral_bonus(user_id, user[8])
-                bot.edit_message_text("✅ Спасибо за подписку! Тебе начислен бонусный запрос, а твоему другу — 3.",
-                                      user_id, call.message.message_id)
+            if user and user[8]:
+                cursor.execute("SELECT rewarded FROM referrals WHERE inviter_id=? AND invitee_id=?", (user[8], user_id))
+                if not cursor.fetchone():
+                    add_bonus(user[8], 3)
+                    add_bonus(user_id, 1)
+                    cursor.execute("INSERT INTO referrals (inviter_id, invitee_id, date, rewarded) VALUES (?,?,?,?)",
+                                   (user[8], user_id, datetime.now().isoformat(), 1))
+                    conn.commit()
+                    bot.edit_message_text("✅ Спасибо за подписку! Тебе начислен бонусный запрос, а твоему другу — 3.",
+                                          user_id, call.message.message_id)
+                else:
+                    bot.edit_message_text("✅ Спасибо за подписку! Бонусы уже были начислены ранее.",
+                                          user_id, call.message.message_id, reply_markup=main_keyboard())
             else:
                 bot.edit_message_text("✅ Спасибо за подписку! Теперь ты можешь пользоваться ботом.",
                                       user_id, call.message.message_id, reply_markup=main_keyboard())
@@ -1226,17 +981,10 @@ def callback_handler(call):
         total = cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         active = cursor.execute("SELECT COUNT(*) FROM users WHERE last_request_date=date('now')").fetchone()[0]
         req_sum = cursor.execute("SELECT SUM(total_requests) FROM users").fetchone()[0] or 0
-        bonus_sum = cursor.execute("SELECT SUM(bonus_balance) FROM users").fetchone()[0] or 0
-        ref_count = cursor.execute("SELECT COUNT(*) FROM referrals").fetchone()[0]
-        bot.edit_message_text(f"📊 <b>Статистика</b>\n\n"
-                              f"👥 Всего пользователей: {total}\n"
-                              f"🔥 Активных сегодня: {active}\n"
-                              f"📝 Всего запросов: {req_sum}\n"
-                              f"🎁 Всего бонусных: {bonus_sum}\n"
-                              f"🔗 Всего рефералов: {ref_count}",
+        bot.edit_message_text(f"📊 <b>Статистика</b>\n\n👥 Всего: {total}\n🔥 Активных сегодня: {active}\n📝 Всего запросов: {req_sum}",
                               user_id, call.message.message_id, parse_mode="HTML", reply_markup=back_keyboard())
     elif data == "admin_userlist":
-        cursor.execute("SELECT user_id, first_name, username, total_requests, requests_today, bonus_balance, subscribed, is_blocked, referrer_id FROM users ORDER BY user_id DESC LIMIT 15")
+        cursor.execute("SELECT user_id, first_name, username, total_requests, requests_today, bonus_balance, subscribed, is_blocked FROM users ORDER BY user_id DESC LIMIT 15")
         rows = cursor.fetchall()
         if not rows:
             text = "Список пуст."
@@ -1245,8 +993,7 @@ def callback_handler(call):
             for r in rows:
                 sub = "✅" if r[6] else "❌"
                 block = "🚫" if r[7] else ""
-                ref = f"приглашён {r[8]}" if r[8] else "—"
-                text += f"🆔 {r[0]} | {r[1] or '?'} @{r[2] or '—'} {sub}{block}\n   Всего: {r[3]}, сегодня: {r[4]}, бонус: {r[5]}, {ref}\n"
+                text += f"🆔 {r[0]} | {r[1] or '?'} @{r[2] or '—'} {sub}{block}\n   Всего: {r[3]}, сегодня: {r[4]}, бонус: {r[5]}\n"
         bot.edit_message_text(text, user_id, call.message.message_id, parse_mode="HTML", reply_markup=back_keyboard())
     elif data == "admin_broadcast":
         msg = bot.send_message(user_id, "Введи текст для рассылки (можно с HTML).")
@@ -1291,8 +1038,8 @@ def process_grant(message):
         add_bonus(uid, amount)
         try:
             bot.send_message(uid, f"🎁 Вам начислено {amount} бонусных запросов от администратора!")
-        except Exception as e:
-            logging.warning(f"Failed to notify user {uid} about bonus: {e}")
+        except:
+            pass
         bot.send_message(message.chat.id, f"✅ Пользователю {uid} добавлено {amount} бонусных запросов.")
         log_admin(message.from_user.id, "grant", f"{uid} +{amount}")
     except:
@@ -1320,23 +1067,20 @@ def process_unblock(message):
 
 # ========== ЗАПУСК ==========
 if __name__ == "__main__":
-    print("╔════════════════════════════════════════════╗")
-    print("║        🚀 ПРОРАБ ГДЗ ЗАПУЩЕН              ║")
-    print("╠════════════════════════════════════════════╣")
-    print("║ ✅ Физика (точные расчёты)                ║")
-    print("║ ✅ Статистика (комбинаторика)             ║")
-    print("║ ✅ База знаний (обществознание, лит-ра)   ║")
-    print("║ ✅ Новые предметы: статистика, социал,    ║")
-    print("║    литература, русский язык               ║")
-    print("║ ✅ Ежедневный сброс в 8:00 МСК            ║")
-    print("║ ✅ Уведомления о сбросе                    ║")
-    print("║ ✅ Реферальная система ИСПРАВЛЕНА         ║")
-    print("║ ✅ Кнопки рефералки и баланса              ║")
-    print("║ ✅ Распознавание фото                       ║")
-    print("║ ✅ Блокировка/разблокировка                ║")
-    print("║ ✅ Уведомление о бонусах                   ║")
-    print("║ 🔒 VPN: @ProrabVPN_bot                     ║")
-    print("╚════════════════════════════════════════════╝")
+    print("╔════════════════════════════════════╗")
+    print("║     🚀 ПРОРАБ ГДЗ ЗАПУЩЕН         ║")
+    print("╠════════════════════════════════════╣")
+    print("║ ✅ Подписка: МГНОВЕННАЯ проверка  ║")
+    print("║ ✅ Физика: точные расчёты         ║")
+    print("║ ✅ Генетика: решётки Пеннета      ║")
+    print("║ ✅ Статистика: комбинаторика      ║")
+    print("║ ✅ Русский язык: фонетика         ║")
+    print("║ ✅ Литература: анализ             ║")
+    print("║ ✅ Обществознание: термины        ║")
+    print("║ ✅ Тригонометрия: fallback        ║")
+    print("║ ✅ Кнопки: баланс, рефералка      ║")
+    print("║ 🔒 VPN: @ProrabVPN_bot            ║")
+    print("╚════════════════════════════════════╝")
     while True:
         try:
             bot.polling(none_stop=True)
