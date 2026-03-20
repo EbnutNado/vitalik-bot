@@ -1,35 +1,39 @@
-import asyncio
 import logging
 import sqlite3
+import sys
+import traceback
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types, executor
+from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.middlewares.logging import LoggingMiddleware
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
 
-# ========== КОНФИГУРАЦИЯ (вставьте свои данные) ==========
-BOT_TOKEN = "8460789866:AAHPtTNzZo_lmlECcBeWq_CEUsxQwejfSWc"  # замените на реальный токен
-BOT_USERNAME = "podsl49_bot"  # без @, например "my_channel_bot"
-CHANNEL_ID = -1003572107512  # ID канала (отрицательный)
-ADMIN_CHAT_ID = -5203973280  # ID группы модерации (отрицательный)
-MAIN_ADMIN_IDS = [6042290296, 7412555136, 5775839902]  # ваш Telegram ID (число)
-ADMIN_CONTACTS = """
-💬 Telegram: @dlua0podsl
-"""
-# ==========================================================
+# ========== КОНФИГУРАЦИЯ ==========
+BOT_TOKEN = "8460789866:AAHPtTNzZo_lmlECcBeWq_CEUsxQwejfSWc"                     # Токен от @BotFather
+BOT_USERNAME = "podsl49_bot"              # Username бота (без @)
+CHANNEL_ID = -1003572107512                 # ID канала (отрицательный)
+ADMIN_CHAT_ID = -1003636427960              # ID группы для модерации (отрицательный)
+MAIN_ADMIN_IDS = [6042290296, 7412555136, 5775839902]                # Ваш Telegram ID (число)
+ADMIN_CONTACTS = "💬 Telegram: @dlua0podsl"     # Контакты для раздела поддержки
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
+# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
-# Инициализация бота
-bot = Bot(token=BOT_TOKEN, parse_mode=types.ParseMode.HTML)
+# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 dp.middleware.setup(LoggingMiddleware())
 
-# Подключение к базе данных
+# ========== БАЗА ДАННЫХ ==========
 conn = sqlite3.connect('bot_database.db', check_same_thread=False)
 cursor = conn.cursor()
 
@@ -85,10 +89,40 @@ CREATE TABLE IF NOT EXISTS support_requests (
     resolved_at TIMESTAMP
 )
 ''')
-
 conn.commit()
+logger.info("База данных инициализирована")
 
-# Клавиатуры для пользователей
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def get_or_create_user(tg_id, username, first_name):
+    cursor.execute('SELECT * FROM users WHERE tg_id = ?', (tg_id,))
+    user = cursor.fetchone()
+    if not user:
+        is_admin = 1 if tg_id in MAIN_ADMIN_IDS else 0
+        cursor.execute('''
+            INSERT INTO users (tg_id, username, first_name, is_admin)
+            VALUES (?, ?, ?, ?)
+        ''', (tg_id, username, first_name, is_admin))
+        conn.commit()
+        cursor.execute('SELECT * FROM users WHERE tg_id = ?', (tg_id,))
+        user = cursor.fetchone()
+    return user
+
+def is_admin(user_id):
+    cursor.execute('SELECT is_admin FROM users WHERE tg_id = ?', (user_id,))
+    result = cursor.fetchone()
+    return result and result[0] == 1
+
+def format_post_text(post_text, user, is_anonymous):
+    if is_anonymous:
+        author_line = "👤 Автор: Анонимно"
+    else:
+        author_line = f"👤 Автор: {user[3]}"
+        if user[2]:
+            author_line += f" (@{user[2]})"
+    suggest_link = f"<a href='https://t.me/{BOT_USERNAME}'>📢 | Предложить пост</a>"
+    return f"{post_text}\n\n{author_line}\n\n{suggest_link}"
+
+# ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard():
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
@@ -126,7 +160,7 @@ def get_admin_keyboard():
     )
     return keyboard
 
-# Состояния
+# ========== СОСТОЯНИЯ ==========
 class PostStates(StatesGroup):
     waiting_for_content = State()
     waiting_for_anonymous_choice = State()
@@ -135,44 +169,12 @@ class SupportStates(StatesGroup):
     waiting_for_message = State()
 
 class AdminStates(StatesGroup):
-    waiting_for_user_id_ban = State()
-    waiting_for_user_id_unban = State()
     waiting_for_admin_add = State()
     waiting_for_admin_remove = State()
+    waiting_for_user_id_unban = State()
     waiting_for_support_response = State()
 
-def get_or_create_user(tg_id, username, first_name):
-    cursor.execute('SELECT * FROM users WHERE tg_id = ?', (tg_id,))
-    user = cursor.fetchone()
-    
-    if not user:
-        is_admin = 1 if tg_id in MAIN_ADMIN_IDS else 0
-        cursor.execute('''
-        INSERT INTO users (tg_id, username, first_name, is_admin)
-        VALUES (?, ?, ?, ?)
-        ''', (tg_id, username, first_name, is_admin))
-        conn.commit()
-        cursor.execute('SELECT * FROM users WHERE tg_id = ?', (tg_id,))
-        user = cursor.fetchone()
-    
-    return user
-
-def format_post_text(post_text, user, is_anonymous):
-    if is_anonymous:
-        author_line = "👤 Автор: Анонимно"
-    else:
-        author_line = f"👤 Автор: {user[3]}"
-        if user[2]:
-            author_line += f" (@{user[2]})"
-    
-    suggest_link = f"<a href='https://t.me/{BOT_USERNAME}'>📢 | Предложить пост</a>"
-    return f"{post_text}\n\n{author_line}\n\n{suggest_link}"
-
-def is_admin(user_id):
-    cursor.execute('SELECT is_admin FROM users WHERE tg_id = ?', (user_id,))
-    result = cursor.fetchone()
-    return result and result[0] == 1
-
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     try:
@@ -181,7 +183,6 @@ async def cmd_start(message: types.Message):
             message.from_user.username,
             message.from_user.first_name
         )
-        
         welcome_text = (
             f"👋 Привет, {message.from_user.first_name}!\n\n"
             f"Я бот для предложения постов в канал.\n\n"
@@ -190,17 +191,14 @@ async def cmd_start(message: types.Message):
             f"ℹ️ Подробнее о работе бота — «Помощь»\n\n"
             f"Все посты проходят модерацию перед публикацией."
         )
-        
         await message.answer(welcome_text, reply_markup=get_main_keyboard())
-        
         if is_admin(message.from_user.id):
             admin_button = ReplyKeyboardMarkup(resize_keyboard=True).add(
                 KeyboardButton("👑 Админ-панель")
             )
             await message.answer("🔐 У вас есть доступ к админ-панели", reply_markup=admin_button)
-            
     except Exception as e:
-        logging.error(f"Error in start: {e}")
+        logger.error(f"Ошибка в /start: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.message_handler(commands=['help'])
@@ -214,30 +212,14 @@ async def cmd_help(message: types.Message):
         "<b>📊 Мои посты</b>\n"
         "• Просмотр статуса ваших постов\n\n"
         "<b>🆘 Поддержка</b>\n"
-        "• Связь с администрацией\n"
-        "• Решение проблем и вопросов\n\n"
+        "• Связь с администрацией\n\n"
         "<b>❓ Частые вопросы:</b>\n"
         "• Посты проходят модерацию до 24 часов\n"
-        "• При нарушении правил пост может быть отклонен\n"
-        "• По всем вопросам обращайтесь в поддержку"
+        "• При нарушении правил пост может быть отклонен"
     )
     await message.answer(help_text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-@dp.message_handler(lambda message: message.text == "👑 Админ-панель")
-async def admin_panel(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Доступ запрещен")
-        return
-    await message.answer(
-        "👑 <b>Админ-панель</b>\n\nВыберите действие:",
-        reply_markup=get_admin_keyboard(),
-        parse_mode="HTML"
-    )
-
-@dp.message_handler(lambda message: message.text == "🔙 Выйти из админки")
-async def exit_admin(message: types.Message):
-    await message.answer("Вы вышли из админ-панели", reply_markup=get_main_keyboard())
-
+# ========== ПРЕДЛОЖЕНИЕ ПОСТА ==========
 @dp.message_handler(lambda message: message.text == "📝 Предложить пост")
 async def suggest_post(message: types.Message):
     try:
@@ -246,28 +228,21 @@ async def suggest_post(message: types.Message):
             message.from_user.username,
             message.from_user.first_name
         )
-        
-        if user[4]:
-            await message.answer(
-                "⛔ Вы забанены и не можете отправлять посты.\n"
-                "Для выяснения причин обратитесь в поддержку."
-            )
+        if user[4]:  # is_banned
+            await message.answer("⛔ Вы забанены и не можете отправлять посты.")
             return
-        
+
         await PostStates.waiting_for_content.set()
         await message.answer(
             "📝 Отправьте текст или медиа для поста.\n\n"
-            "Вы можете отправить:\n"
-            "• Текст\n"
-            "• Фото\n"
-            "• Видео\n\n"
+            "Вы можете отправить: текст, фото или видео.\n"
             "Для отмены нажмите «❌ Отмена»",
             reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(
                 KeyboardButton("❌ Отмена")
             )
         )
     except Exception as e:
-        logging.error(f"Error in suggest_post: {e}")
+        logger.error(f"Ошибка в suggest_post: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.message_handler(content_types=['text', 'photo', 'video'], state=PostStates.waiting_for_content)
@@ -276,7 +251,8 @@ async def process_content(message: types.Message, state: FSMContext):
         await state.finish()
         await message.answer("❌ Отменено", reply_markup=get_main_keyboard())
         return
-    
+
+    # Сохраняем контент
     if message.text:
         await state.update_data(text=message.text, media_type=None, media_id=None)
     elif message.photo:
@@ -291,7 +267,7 @@ async def process_content(message: types.Message, state: FSMContext):
             media_type='video',
             media_id=message.video.file_id
         )
-    
+
     await PostStates.waiting_for_anonymous_choice.set()
     await message.answer(
         "🔒 Выберите вариант публикации:",
@@ -304,49 +280,51 @@ async def process_anonymous_choice(message: types.Message, state: FSMContext):
         await state.finish()
         await message.answer("❌ Отменено", reply_markup=get_main_keyboard())
         return
-    
-    is_anonymous = None
+
     if message.text == "👤 От своего имени":
         is_anonymous = False
     elif message.text == "👻 Анонимно":
         is_anonymous = True
-    
-    if is_anonymous is None:
+    else:
         await message.answer("Пожалуйста, выберите вариант с помощью кнопок")
         return
-    
+
     data = await state.get_data()
     user = get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name
     )
-    
+
+    # Сохраняем пост
     cursor.execute('''
-    INSERT INTO posts (user_id, text, media_type, media_id, is_anonymous)
-    VALUES (?, ?, ?, ?, ?)
+        INSERT INTO posts (user_id, text, media_type, media_id, is_anonymous)
+        VALUES (?, ?, ?, ?, ?)
     ''', (user[0], data['text'], data.get('media_type'), data.get('media_id'), is_anonymous))
     conn.commit()
     post_id = cursor.lastrowid
-    
+
+    # Формируем сообщение для админ-чата
     admin_text = f"📝 Новый пост #{post_id}\n"
     if is_anonymous:
-        admin_text += f"👤 Автор: АНОНИМНО\n"
+        admin_text += "👤 Автор: АНОНИМНО\n"
     else:
         admin_text += f"👤 Автор: {user[3]}"
         if user[2]:
             admin_text += f" (@{user[2]})"
-        admin_text += f"\n"
+        admin_text += "\n"
     admin_text += f"🔒 Анонимно: {'Да' if is_anonymous else 'Нет'}\n\n"
-    admin_text += f"📄 Текст:\n{data['text']}\n\n"
-    
+    admin_text += f"📄 Текст:\n{data['text']}\n"
+
+    # Клавиатура для админов
     admin_keyboard = InlineKeyboardMarkup(row_width=2)
     admin_keyboard.add(
         InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{post_id}"),
         InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{post_id}")
     )
-    
+
     try:
+        # Отправляем в админ-чат
         if data.get('media_type') == 'photo':
             admin_msg = await bot.send_photo(
                 ADMIN_CHAT_ID,
@@ -367,49 +345,43 @@ async def process_anonymous_choice(message: types.Message, state: FSMContext):
                 admin_text,
                 reply_markup=admin_keyboard
             )
-        
         cursor.execute('UPDATE posts SET admin_chat_message_id = ? WHERE id = ?',
-                      (admin_msg.message_id, post_id))
+                       (admin_msg.message_id, post_id))
         conn.commit()
-    except Exception as e:
-        logging.error(f"Ошибка отправки админам: {e}")
-        await message.answer("❌ Произошла ошибка при отправке на модерацию")
         await state.finish()
-        return
-    
-    await state.finish()
-    await message.answer(
-        "✅ Пост отправлен на модерацию!\n"
-        "Вы получите уведомление после решения администратора.",
-        reply_markup=get_main_keyboard()
-    )
+        await message.answer("✅ Пост отправлен на модерацию!", reply_markup=get_main_keyboard())
 
+    except Exception as e:
+        logger.error(f"Ошибка отправки в админ-чат: {e}\n{traceback.format_exc()}")
+        await message.answer("❌ Произошла ошибка при отправке на модерацию. Попробуйте позже.")
+        await state.finish()
+
+# ========== ОДОБРЕНИЕ/ОТКЛОНЕНИЕ ==========
 @dp.callback_query_handler(lambda c: c.data.startswith('approve_'))
 async def approve_post(callback_query: types.CallbackQuery):
     if not is_admin(callback_query.from_user.id):
-        await callback_query.answer("⛔ У вас нет прав")
+        await callback_query.answer("⛔ У вас нет прав", show_alert=True)
         return
-    
+
     post_id = int(callback_query.data.split('_')[1])
     cursor.execute('''
-    SELECT p.*, u.* FROM posts p
-    JOIN users u ON p.user_id = u.id
-    WHERE p.id = ?
+        SELECT p.*, u.* FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.id = ?
     ''', (post_id,))
     post_data = cursor.fetchone()
-    
     if not post_data or post_data[6] != 'pending':
-        await callback_query.answer("Пост уже обработан")
+        await callback_query.answer("Пост уже обработан", show_alert=True)
         return
-    
+
     cursor.execute('UPDATE posts SET status = "approved", approved_at = CURRENT_TIMESTAMP WHERE id = ?', (post_id,))
     cursor.execute('INSERT INTO admin_logs (admin_id, post_id, action) VALUES (?, ?, "approve")',
-                  (callback_query.from_user.id, post_id))
+                   (callback_query.from_user.id, post_id))
     conn.commit()
-    
+
     user_data = post_data[9:]
     formatted_text = format_post_text(post_data[3], user_data, bool(post_data[5]))
-    
+
     try:
         if post_data[4] == 'photo':
             await bot.send_photo(CHANNEL_ID, post_data[5], caption=formatted_text, parse_mode="HTML")
@@ -417,9 +389,8 @@ async def approve_post(callback_query: types.CallbackQuery):
             await bot.send_video(CHANNEL_ID, post_data[5], caption=formatted_text, parse_mode="HTML")
         else:
             await bot.send_message(CHANNEL_ID, formatted_text, parse_mode="HTML")
-        
+
         await bot.send_message(user_data[1], f"✅ Ваш пост #{post_id} опубликован в канале!")
-        
         await bot.edit_message_text(
             f"✅ Пост #{post_id} одобрен @{callback_query.from_user.username}\n\n{callback_query.message.text}",
             ADMIN_CHAT_ID,
@@ -427,33 +398,33 @@ async def approve_post(callback_query: types.CallbackQuery):
         )
         await callback_query.answer("Пост опубликован")
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await callback_query.answer("Ошибка публикации")
+        logger.error(f"Ошибка при публикации поста: {e}")
+        await callback_query.answer("Ошибка публикации", show_alert=True)
+
     await callback_query.message.edit_reply_markup()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('reject_'))
 async def reject_post(callback_query: types.CallbackQuery):
     if not is_admin(callback_query.from_user.id):
-        await callback_query.answer("⛔ У вас нет прав")
+        await callback_query.answer("⛔ У вас нет прав", show_alert=True)
         return
-    
+
     post_id = int(callback_query.data.split('_')[1])
     cursor.execute('''
-    SELECT p.*, u.* FROM posts p
-    JOIN users u ON p.user_id = u.id
-    WHERE p.id = ?
+        SELECT p.*, u.* FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.id = ?
     ''', (post_id,))
     post_data = cursor.fetchone()
-    
     if not post_data or post_data[6] != 'pending':
-        await callback_query.answer("Пост уже обработан")
+        await callback_query.answer("Пост уже обработан", show_alert=True)
         return
-    
+
     cursor.execute('UPDATE posts SET status = "rejected" WHERE id = ?', (post_id,))
     cursor.execute('INSERT INTO admin_logs (admin_id, post_id, action) VALUES (?, ?, "reject")',
-                  (callback_query.from_user.id, post_id))
+                   (callback_query.from_user.id, post_id))
     conn.commit()
-    
+
     await bot.send_message(post_data[10], f"❌ Ваш пост #{post_id} отклонён.")
     await bot.edit_message_text(
         f"❌ Пост #{post_id} отклонён @{callback_query.from_user.username}\n\n{callback_query.message.text}",
@@ -463,6 +434,7 @@ async def reject_post(callback_query: types.CallbackQuery):
     await callback_query.answer("Пост отклонён")
     await callback_query.message.edit_reply_markup()
 
+# ========== МОИ ПОСТЫ ==========
 @dp.message_handler(lambda message: message.text == "📊 Мои посты")
 async def my_posts(message: types.Message):
     user = get_or_create_user(
@@ -470,26 +442,23 @@ async def my_posts(message: types.Message):
         message.from_user.username,
         message.from_user.first_name
     )
-    
     cursor.execute('''
-    SELECT id, status, created_at FROM posts 
-    WHERE user_id = ? 
-    ORDER BY created_at DESC LIMIT 10
+        SELECT id, status, created_at FROM posts
+        WHERE user_id = ?
+        ORDER BY created_at DESC LIMIT 10
     ''', (user[0],))
     posts = cursor.fetchall()
-    
     if not posts:
         await message.answer("📭 У вас пока нет постов")
         return
-    
+
     status_emoji = {'pending': '⏳', 'approved': '✅', 'rejected': '❌'}
     text = "📊 <b>Ваши последние посты:</b>\n\n"
     for post in posts:
-        status_text = status_emoji.get(post[1], '❓')
-        date = post[2][:10]
-        text += f"{status_text} Пост #{post[0]} - {date}\n"
+        text += f"{status_emoji.get(post[1], '❓')} Пост #{post[0]} - {post[2][:10]}\n"
     await message.answer(text, parse_mode="HTML")
 
+# ========== ПОДДЕРЖКА ==========
 @dp.message_handler(lambda message: message.text == "🆘 Поддержка")
 async def support(message: types.Message):
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -497,11 +466,9 @@ async def support(message: types.Message):
     keyboard.add(KeyboardButton("🔙 Назад"))
     await message.answer(
         "🆘 <b>Раздел поддержки</b>\n\n"
-        "Если у вас есть вопросы, проблемы или жалобы:\n"
-        "• Нажмите «Написать в поддержку» и отправьте сообщение\n"
-        "• Администраторы свяжутся с вами в ближайшее время\n\n"
-        "Также вы можете обратиться напрямую:\n"
-        f"👥 <b>Администрация канала</b>\n{ADMIN_CONTACTS}",
+        "Нажмите «Написать в поддержку» и отправьте сообщение.\n"
+        "Администраторы ответят вам в ближайшее время.\n\n"
+        f"Контакты: {ADMIN_CONTACTS}",
         parse_mode="HTML",
         reply_markup=keyboard
     )
@@ -510,12 +477,8 @@ async def support(message: types.Message):
 async def write_to_support(message: types.Message):
     await SupportStates.waiting_for_message.set()
     await message.answer(
-        "✍️ Напишите ваше сообщение.\n\n"
-        "Опишите проблему подробно, чтобы мы могли вам помочь.\n"
-        "Для отмены нажмите /cancel",
-        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(
-            KeyboardButton("❌ Отмена")
-        )
+        "✍️ Напишите ваше сообщение. Для отмены /cancel",
+        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("❌ Отмена"))
     )
 
 @dp.message_handler(state=SupportStates.waiting_for_message)
@@ -524,60 +487,57 @@ async def process_support_message(message: types.Message, state: FSMContext):
         await state.finish()
         await message.answer("❌ Отменено", reply_markup=get_main_keyboard())
         return
-    
+
     user = get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name
     )
-    
     cursor.execute('INSERT INTO support_requests (user_id, message) VALUES (?, ?)', (user[0], message.text))
     conn.commit()
     request_id = cursor.lastrowid
-    
-    for admin_id in MAIN_ADMIN_IDS:
-        try:
-            admin_keyboard = InlineKeyboardMarkup().add(
-                InlineKeyboardButton("📝 Ответить", callback_data=f"reply_support_{request_id}")
-            )
-            await bot.send_message(
-                admin_id,
-                f"🆘 Новый запрос в поддержку #{request_id}\n\n"
-                f"👤 От: {user[3]}\n🆔 ID: {user[1]}\n📝 Сообщение:\n{message.text}",
-                reply_markup=admin_keyboard
-            )
-        except:
-            pass
-    
-    await state.finish()
-    await message.answer(
-        "✅ Ваше сообщение отправлено!\nАдминистраторы ответят вам в ближайшее время.",
-        reply_markup=get_main_keyboard()
+
+    # Отправляем в админ-чат
+    admin_text = (
+        f"🆘 Новый запрос в поддержку #{request_id}\n"
+        f"👤 От: {user[3]}"
     )
+    if user[2]:
+        admin_text += f" (@{user[2]})"
+    admin_text += f"\n📝 Сообщение:\n{message.text}"
+
+    admin_keyboard = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("📝 Ответить", callback_data=f"reply_support_{request_id}")
+    )
+    try:
+        await bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=admin_keyboard)
+    except Exception as e:
+        logger.error(f"Не удалось отправить запрос поддержки в админ-чат: {e}")
+
+    await state.finish()
+    await message.answer("✅ Сообщение отправлено! Администраторы ответят.", reply_markup=get_main_keyboard())
 
 @dp.callback_query_handler(lambda c: c.data.startswith('reply_support_'))
 async def reply_to_support(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
-        await callback_query.answer("⛔ Доступ запрещен")
+        await callback_query.answer("⛔ Доступ запрещен", show_alert=True)
         return
-    
+
     request_id = int(callback_query.data.split('_')[2])
     cursor.execute('''
-    SELECT sr.*, u.tg_id, u.first_name FROM support_requests sr
-    JOIN users u ON sr.user_id = u.id
-    WHERE sr.id = ?
+        SELECT sr.*, u.tg_id, u.first_name FROM support_requests sr
+        JOIN users u ON sr.user_id = u.id
+        WHERE sr.id = ?
     ''', (request_id,))
     request = cursor.fetchone()
-    
     if not request:
         await callback_query.answer("Запрос не найден")
         return
-    
+
     await AdminStates.waiting_for_support_response.set()
     await state.update_data(request_id=request_id, user_tg_id=request[6])
     await callback_query.message.answer(
-        f"📝 Ответ на запрос #{request_id}\n\n"
-        f"Сообщение пользователя:\n{request[2]}\n\nВведите ваш ответ:"
+        f"📝 Ответ на запрос #{request_id}\n\nСообщение пользователя:\n{request[2]}\n\nВведите ваш ответ:"
     )
     await callback_query.answer()
 
@@ -585,62 +545,75 @@ async def reply_to_support(callback_query: types.CallbackQuery, state: FSMContex
 async def process_support_response(message: types.Message, state: FSMContext):
     data = await state.get_data()
     cursor.execute('''
-    UPDATE support_requests 
-    SET status = 'resolved', admin_response = ?, resolved_at = CURRENT_TIMESTAMP
-    WHERE id = ?
+        UPDATE support_requests
+        SET status = 'resolved', admin_response = ?, resolved_at = CURRENT_TIMESTAMP
+        WHERE id = ?
     ''', (message.text, data['request_id']))
     conn.commit()
-    await bot.send_message(
-        data['user_tg_id'],
-        f"🆘 <b>Ответ от администрации</b>\n\n{message.text}\n\n"
-        f"Если остались вопросы, напишите снова в поддержку.",
-        parse_mode="HTML"
-    )
+    try:
+        await bot.send_message(
+            data['user_tg_id'],
+            f"🆘 <b>Ответ от администрации</b>\n\n{message.text}\n\nЕсли остались вопросы, напишите снова.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить ответ пользователю: {e}")
     await state.finish()
     await message.answer("✅ Ответ отправлен пользователю")
 
-@dp.message_handler(lambda message: message.text == "🔙 Назад")
-async def back_to_main(message: types.Message):
-    await message.answer("Главное меню", reply_markup=get_main_keyboard())
-
-@dp.message_handler(lambda message: message.text == "ℹ️ Помощь")
-async def show_help(message: types.Message):
-    await cmd_help(message)
-
-# Админские функции
-@dp.message_handler(lambda message: message.text == "📋 Ожидающие посты")
-async def admin_pending_posts(message: types.Message):
+# ========== АДМИН-ПАНЕЛЬ ==========
+@dp.message_handler(lambda message: message.text == "👑 Админ-панель")
+async def admin_panel(message: types.Message):
     if not is_admin(message.from_user.id):
+        await message.answer("⛔ Доступ запрещен")
         return
+    await message.answer("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=get_admin_keyboard())
+
+@dp.message_handler(lambda message: message.text == "🔙 Выйти из админки")
+async def exit_admin(message: types.Message):
+    await message.answer("Вы вышли из админ-панели", reply_markup=get_main_keyboard())
+
+# Статистика и управление админами (кратко, так как код большой)
+@dp.message_handler(lambda message: message.text == "📋 Ожидающие посты")
+async def pending_posts(message: types.Message):
+    if not is_admin(message.from_user.id): return
     cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "pending"')
     count = cursor.fetchone()[0]
     await message.answer(f"📋 Ожидающие посты: {count} шт.\nПроверьте чат модерации")
 
 @dp.message_handler(lambda message: message.text == "✅ Одобренные посты")
-async def admin_approved_posts(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
+async def approved_posts(message: types.Message):
+    if not is_admin(message.from_user.id): return
     cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "approved" AND date(approved_at) = date("now")')
     today = cursor.fetchone()[0]
     cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "approved"')
     total = cursor.fetchone()[0]
+    await message.answer(f"✅ Сегодня: {today}\nВсего: {total}", parse_mode="HTML")
+
+@dp.message_handler(lambda message: message.text == "📊 Статистика")
+async def admin_stats(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "approved"')
+    approved = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "pending"')
+    pending = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM users')
+    users = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM support_requests WHERE status = "pending"')
+    support = cursor.fetchone()[0]
     await message.answer(
-        f"✅ <b>Статистика одобренных постов</b>\n\n📅 Сегодня: {today}\n📊 Всего: {total}",
+        f"✅ Одобрено: {approved}\n⏳ Ожидает: {pending}\n👥 Пользователей: {users}\n🆘 Запросов поддержки: {support}",
         parse_mode="HTML"
     )
 
 @dp.message_handler(lambda message: message.text == "👥 Управление админами")
 async def manage_admins(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
+    if not is_admin(message.from_user.id): return
     cursor.execute('SELECT tg_id, first_name, username FROM users WHERE is_admin = 1')
     admins = cursor.fetchall()
-    text = "👥 <b>Список администраторов:</b>\n\n"
-    for admin in admins:
-        text += f"• {admin[1]}"
-        if admin[2]:
-            text += f" (@{admin[2]})"
-        text += f" - ID: <code>{admin[0]}</code>\n"
+    text = "👥 Список администраторов:\n\n"
+    for a in admins:
+        text += f"• {a[1]}" + (f" (@{a[2]})" if a[2] else "") + f" - ID: <code>{a[0]}</code>\n"
     keyboard = InlineKeyboardMarkup(row_width=2).add(
         InlineKeyboardButton("➕ Добавить админа", callback_data="add_admin"),
         InlineKeyboardButton("➖ Удалить админа", callback_data="remove_admin")
@@ -650,25 +623,19 @@ async def manage_admins(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data == "add_admin")
 async def add_admin_prompt(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
-        await callback_query.answer("⛔ Доступ запрещен")
+        await callback_query.answer("⛔ Доступ запрещен", show_alert=True)
         return
     await AdminStates.waiting_for_admin_add.set()
-    await callback_query.message.answer(
-        "➕ Введите ID пользователя, которого хотите сделать администратором:\n\n"
-        "ID можно получить через @userinfobot"
-    )
+    await callback_query.message.answer("Введите ID пользователя:")
     await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data == "remove_admin")
 async def remove_admin_prompt(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
-        await callback_query.answer("⛔ Доступ запрещен")
+        await callback_query.answer("⛔ Доступ запрещен", show_alert=True)
         return
     await AdminStates.waiting_for_admin_remove.set()
-    await callback_query.message.answer(
-        "➖ Введите ID пользователя, которого хотите удалить из администраторов:\n\n"
-        "⚠️ Вы не можете удалить главного администратора"
-    )
+    await callback_query.message.answer("Введите ID пользователя:")
     await callback_query.answer()
 
 @dp.message_handler(state=AdminStates.waiting_for_admin_add)
@@ -680,13 +647,13 @@ async def process_add_admin(message: types.Message, state: FSMContext):
         if cursor.rowcount > 0:
             await message.answer(f"✅ Пользователь {user_id} добавлен в администраторы")
             try:
-                await bot.send_message(user_id, "🎉 Вам выданы права администратора!\nТеперь вы можете модерировать посты.")
+                await bot.send_message(user_id, "🎉 Вам выданы права администратора!")
             except:
                 pass
         else:
             await message.answer("❌ Пользователь не найден в базе. Попросите его написать /start")
     except ValueError:
-        await message.answer("❌ Неверный формат ID. Введите число")
+        await message.answer("❌ Неверный ID")
     await state.finish()
 
 @dp.message_handler(state=AdminStates.waiting_for_admin_remove)
@@ -708,36 +675,30 @@ async def process_remove_admin(message: types.Message, state: FSMContext):
         else:
             await message.answer("❌ Пользователь не является администратором")
     except ValueError:
-        await message.answer("❌ Неверный формат ID")
+        await message.answer("❌ Неверный ID")
     await state.finish()
 
 @dp.message_handler(lambda message: message.text == "🚫 Заблокированные")
 async def banned_users(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
+    if not is_admin(message.from_user.id): return
     cursor.execute('SELECT tg_id, first_name, username FROM users WHERE is_banned = 1')
     banned = cursor.fetchall()
     if not banned:
         await message.answer("📭 Нет заблокированных пользователей")
         return
-    text = "🚫 <b>Заблокированные пользователи:</b>\n\n"
-    for user in banned:
-        text += f"• {user[1]}"
-        if user[2]:
-            text += f" (@{user[2]})"
-        text += f" - ID: <code>{user[0]}</code>\n"
-    keyboard = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("🔓 Разблокировать", callback_data="unban_menu")
-    )
+    text = "🚫 Заблокированные:\n\n"
+    for u in banned:
+        text += f"• {u[1]}" + (f" (@{u[2]})" if u[2] else "") + f" - ID: <code>{u[0]}</code>\n"
+    keyboard = InlineKeyboardMarkup().add(InlineKeyboardButton("🔓 Разблокировать", callback_data="unban_menu"))
     await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data == "unban_menu")
 async def unban_menu(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
-        await callback_query.answer("⛔ Доступ запрещен")
+        await callback_query.answer("⛔ Доступ запрещен", show_alert=True)
         return
     await AdminStates.waiting_for_user_id_unban.set()
-    await callback_query.message.answer("🔓 Введите ID пользователя, которого хотите разблокировать:")
+    await callback_query.message.answer("Введите ID пользователя для разблокировки:")
     await callback_query.answer()
 
 @dp.message_handler(state=AdminStates.waiting_for_user_id_unban)
@@ -749,131 +710,40 @@ async def process_unban(message: types.Message, state: FSMContext):
         if cursor.rowcount > 0:
             await message.answer(f"✅ Пользователь {user_id} разблокирован")
             try:
-                await bot.send_message(user_id, "✅ Вы разблокированы администратором")
+                await bot.send_message(user_id, "✅ Вы разблокированы")
             except:
                 pass
         else:
             await message.answer("❌ Пользователь не найден или не был заблокирован")
     except ValueError:
-        await message.answer("❌ Неверный формат ID")
+        await message.answer("❌ Неверный ID")
     await state.finish()
 
-@dp.message_handler(lambda message: message.text == "📊 Статистика")
-async def admin_stats(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "approved"')
-    total_approved = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "pending"')
-    total_pending = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "rejected"')
-    total_rejected = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM users')
-    total_users = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM users WHERE is_banned = 1')
-    total_banned = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM support_requests WHERE status = "pending"')
-    pending_support = cursor.fetchone()[0]
-    stats_text = (
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"✅ Одобрено: {total_approved}\n"
-        f"⏳ Ожидает: {total_pending}\n"
-        f"❌ Отклонено: {total_rejected}\n"
-        f"👥 Пользователей: {total_users}\n"
-        f"🚫 Заблокировано: {total_banned}\n"
-        f"🆘 Запросов поддержки: {pending_support}"
-    )
-    await message.answer(stats_text, parse_mode="HTML")
-
 @dp.message_handler(lambda message: message.text == "🆘 Запросы поддержки")
-async def support_requests(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
+async def support_requests_admin(message: types.Message):
+    if not is_admin(message.from_user.id): return
     cursor.execute('''
-    SELECT sr.id, sr.message, sr.created_at, u.first_name, u.username 
-    FROM support_requests sr
-    JOIN users u ON sr.user_id = u.id
-    WHERE sr.status = "pending"
-    ORDER BY sr.created_at DESC
+        SELECT sr.id, sr.message, sr.created_at, u.first_name, u.username
+        FROM support_requests sr
+        JOIN users u ON sr.user_id = u.id
+        WHERE sr.status = "pending"
+        ORDER BY sr.created_at DESC
     ''')
     requests = cursor.fetchall()
     if not requests:
-        await message.answer("📭 Нет активных запросов в поддержку")
+        await message.answer("📭 Нет активных запросов")
         return
     for req in requests:
-        text = f"🆘 <b>Запрос #{req[0]}</b>\n👤 От: {req[3]}"
-        if req[4]:
-            text += f" (@{req[4]})"
-        text += f"\n📅 {req[2][:19]}\n\n📝 {req[1]}"
-        keyboard = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("📝 Ответить", callback_data=f"reply_support_{req[0]}")
-        )
+        text = f"🆘 Запрос #{req[0]}\n👤 От: {req[3]}" + (f" (@{req[4]})" if req[4] else "") + f"\n📅 {req[2][:19]}\n\n{req[1]}"
+        keyboard = InlineKeyboardMarkup().add(InlineKeyboardButton("📝 Ответить", callback_data=f"reply_support_{req[0]}"))
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
-
-@dp.message_handler(commands=['ban'])
-async def ban_user(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    args = message.get_args()
-    if not args:
-        await message.answer("Использование: /ban [user_id]")
-        return
-    try:
-        user_id = int(args)
-        cursor.execute('UPDATE users SET is_banned = 1 WHERE tg_id = ?', (user_id,))
-        conn.commit()
-        if cursor.rowcount > 0:
-            await message.answer(f"✅ Пользователь {user_id} заблокирован")
-            try:
-                await bot.send_message(user_id, "⛔ Вы заблокированы администратором")
-            except:
-                pass
-        else:
-            await message.answer("❌ Пользователь не найден")
-    except ValueError:
-        await message.answer("❌ Неверный формат ID")
-
-@dp.message_handler(commands=['unban'])
-async def unban_user(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    args = message.get_args()
-    if not args:
-        await message.answer("Использование: /unban [user_id]")
-        return
-    try:
-        user_id = int(args)
-        cursor.execute('UPDATE users SET is_banned = 0 WHERE tg_id = ?', (user_id,))
-        conn.commit()
-        if cursor.rowcount > 0:
-            await message.answer(f"✅ Пользователь {user_id} разблокирован")
-            try:
-                await bot.send_message(user_id, "✅ Вы разблокированы администратором")
-            except:
-                pass
-        else:
-            await message.answer("❌ Пользователь не найден")
-    except ValueError:
-        await message.answer("❌ Неверный формат ID")
-
-@dp.message_handler(commands=['adminlist'])
-async def admin_list(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    cursor.execute('SELECT tg_id, first_name, username FROM users WHERE is_admin = 1')
-    admins = cursor.fetchall()
-    text = "👥 <b>Список администраторов:</b>\n\n"
-    for admin in admins:
-        text += f"• {admin[1]}"
-        if admin[2]:
-            text += f" (@{admin[2]})"
-        text += f" - <code>{admin[0]}</code>\n"
-    await message.answer(text, parse_mode="HTML")
 
 @dp.message_handler(commands=['cancel'], state='*')
 async def cancel_command(message: types.Message, state: FSMContext):
     await state.finish()
     await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
 
+# ========== ЗАПУСК ==========
 if __name__ == '__main__':
+    logger.info("Бот запущен")
     executor.start_polling(dp, skip_updates=True)
