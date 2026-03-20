@@ -18,7 +18,7 @@ BOT_USERNAME = "podsl49_bot"
 CHANNEL_ID = -1003572107512
 ADMIN_CHAT_ID = -1003636427960
 MAIN_ADMIN_IDS = [6042290296, 7412555136, 5775839902]
-ADMIN_CONTACTS = "💬 Telegram: @dlua0podsl"
+ADMIN_CONTACTS = "💬 Telegram: @podslyshano499"
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
