@@ -10,6 +10,7 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
+from html import escape
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = "8460789866:AAHPtTNzZo_lmlECcBeWq_CEUsxQwejfSWc"
@@ -122,6 +123,7 @@ def is_admin(user_id):
 
 def format_post_text(post_text, user, is_anonymous):
     """Форматирует текст поста для публикации в канале"""
+    safe_text = escape(post_text or "")
     if is_anonymous:
         author_line = "👤 Автор: Анонимно"
     else:
@@ -131,7 +133,7 @@ def format_post_text(post_text, user, is_anonymous):
             author_line += f" (@{user[2]})"
     # HTML-ссылка на бота
     suggest_link = f'<a href="https://t.me/{BOT_USERNAME}">📢 | Предложить пост</a>'
-    return f"{post_text}\n\n{author_line}\n\n{suggest_link}"
+    return f"{safe_text}\n\n{author_line}\n\n{suggest_link}"
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard():
@@ -204,9 +206,8 @@ async def cmd_start(message: types.Message):
         )
         await message.answer(welcome_text, reply_markup=get_main_keyboard())
         if is_admin(message.from_user.id):
-            admin_button = ReplyKeyboardMarkup(resize_keyboard=True).add(
-                KeyboardButton("👑 Админ-панель")
-            )
+            admin_button = get_main_keyboard()
+            admin_button.add(KeyboardButton("👑 Админ-панель"))
             await message.answer("🔐 У вас есть доступ к админ-панели", reply_markup=admin_button)
     except Exception as e:
         logger.error(f"Ошибка в /start: {e}\n{traceback.format_exc()}")
@@ -390,20 +391,22 @@ async def approve_post(callback_query: types.CallbackQuery):
                    (callback_query.from_user.id, post_id))
     conn.commit()
 
-    user_data = post_data[9:]  # данные пользователя
-    formatted_text = format_post_text(post_data[3], user_data, bool(post_data[5]))
+    # p.* (11 колонок) + u.* => user начинается с индекса 11
+    user_data = post_data[11:]
+    formatted_text = format_post_text(post_data[2], user_data, bool(post_data[5]))
 
     try:
         if post_data[4] == 'photo':
-            await bot.send_photo(CHANNEL_ID, post_data[5], caption=formatted_text, parse_mode="HTML")
+            await bot.send_photo(CHANNEL_ID, post_data[4], caption=formatted_text, parse_mode="HTML")
         elif post_data[4] == 'video':
-            await bot.send_video(CHANNEL_ID, post_data[5], caption=formatted_text, parse_mode="HTML")
+            await bot.send_video(CHANNEL_ID, post_data[4], caption=formatted_text, parse_mode="HTML")
         else:
             await bot.send_message(CHANNEL_ID, formatted_text, parse_mode="HTML")
 
         await bot.send_message(user_data[1], f"✅ Ваш пост #{post_id} опубликован в канале!")
+        admin_source_text = callback_query.message.text or callback_query.message.caption or ""
         await bot.edit_message_text(
-            f"✅ <b>Пост #{post_id} одобрен</b> @{callback_query.from_user.username}\n\n{callback_query.message.text}",
+            f"✅ <b>Пост #{post_id} одобрен</b> @{callback_query.from_user.username}\n\n{admin_source_text}",
             ADMIN_CHAT_ID,
             callback_query.message.message_id,
             parse_mode="HTML"
@@ -437,9 +440,11 @@ async def reject_post(callback_query: types.CallbackQuery):
                    (callback_query.from_user.id, post_id))
     conn.commit()
 
-    await bot.send_message(post_data[10], f"❌ Ваш пост #{post_id} отклонён.")
+    user_tg_id = post_data[12]
+    await bot.send_message(user_tg_id, f"❌ Ваш пост #{post_id} отклонён.")
+    admin_source_text = callback_query.message.text or callback_query.message.caption or ""
     await bot.edit_message_text(
-        f"❌ <b>Пост #{post_id} отклонён</b> @{callback_query.from_user.username}\n\n{callback_query.message.text}",
+        f"❌ <b>Пост #{post_id} отклонён</b> @{callback_query.from_user.username}\n\n{admin_source_text}",
         ADMIN_CHAT_ID,
         callback_query.message.message_id,
         parse_mode="HTML"
