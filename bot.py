@@ -481,39 +481,46 @@ async def write_to_support(message: types.Message):
         reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("❌ Отмена"))
     )
 
-@dp.message_handler(state=SupportStates.waiting_for_message)
-async def process_support_message(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.finish()
-        await message.answer("❌ Отменено", reply_markup=get_main_keyboard())
-        return
+@dp.message_handler(state=AdminStates.waiting_for_support_response)
+async def process_support_response(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    request_id = data['request_id']
+    user_tg_id = data.get('user_tg_id')
+    
+    # Если ID пользователя не сохранён в состоянии – получим из БД
+    if not user_tg_id:
+        cursor.execute('''
+            SELECT u.tg_id FROM support_requests sr
+            JOIN users u ON sr.user_id = u.id
+            WHERE sr.id = ?
+        ''', (request_id,))
+        row = cursor.fetchone()
+        if row:
+            user_tg_id = row[0]
+        else:
+            await message.answer("❌ Не удалось найти пользователя для ответа")
+            await state.finish()
+            return
 
-    user = get_or_create_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
-    cursor.execute('INSERT INTO support_requests (user_id, message) VALUES (?, ?)', (user[0], message.text))
+    # Обновляем запрос в БД
+    cursor.execute('''
+        UPDATE support_requests
+        SET status = 'resolved', admin_response = ?, resolved_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ''', (message.text, request_id))
     conn.commit()
-    request_id = cursor.lastrowid
 
-    # Отправляем в админ-чат
-    admin_text = (
-        f"🆘 Новый запрос в поддержку #{request_id}\n"
-        f"👤 От: {user[3]}"
-    )
-    if user[2]:
-        admin_text += f" (@{user[2]})"
-    admin_text += f"\n📝 Сообщение:\n{message.text}"
-
-    admin_keyboard = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("📝 Ответить", callback_data=f"reply_support_{request_id}")
-    )
     try:
-        await bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=admin_keyboard)
+        await bot.send_message(
+            user_tg_id,
+            f"🆘 <b>Ответ от администрации</b>\n\n{message.text}\n\nЕсли остались вопросы, напишите снова.",
+            parse_mode="HTML"
+        )
+        await message.answer("✅ Ответ отправлен пользователю")
     except Exception as e:
-        logger.error(f"Не удалось отправить запрос поддержки в админ-чат: {e}")
-
+        logger.error(f"Не удалось отправить ответ пользователю {user_tg_id}: {e}")
+        await message.answer(f"❌ Не удалось отправить ответ (пользователь заблокировал бота). Ответ сохранён в базе.")
+    
     await state.finish()
     await message.answer("✅ Сообщение отправлено! Администраторы ответят.", reply_markup=get_main_keyboard())
 
