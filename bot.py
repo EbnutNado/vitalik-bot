@@ -561,7 +561,7 @@ async def process_support_message(message: types.Message, state: FSMContext):
     )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('reply_support_'))
-async def reply_to_support(callback_query: types.CallbackQuery):
+async def reply_to_support(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
         await callback_query.answer("⛔ Доступ запрещен")
         return
@@ -580,7 +580,6 @@ async def reply_to_support(callback_query: types.CallbackQuery):
         return
     
     await AdminStates.waiting_for_support_response.set()
-    await state = dp.current_state(user=callback_query.from_user.id)
     await state.update_data(request_id=request_id, user_tg_id=request[6])
     
     await callback_query.message.answer(
@@ -694,7 +693,7 @@ async def manage_admins(message: types.Message):
     await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data == "add_admin")
-async def add_admin_prompt(callback_query: types.CallbackQuery):
+async def add_admin_prompt(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
         await callback_query.answer("⛔ Доступ запрещен")
         return
@@ -707,7 +706,7 @@ async def add_admin_prompt(callback_query: types.CallbackQuery):
     await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data == "remove_admin")
-async def remove_admin_prompt(callback_query: types.CallbackQuery):
+async def remove_admin_prompt(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
         await callback_query.answer("⛔ Доступ запрещен")
         return
@@ -803,7 +802,7 @@ async def banned_users(message: types.Message):
     await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data == "unban_menu")
-async def unban_menu(callback_query: types.CallbackQuery):
+async def unban_menu(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
         await callback_query.answer("⛔ Доступ запрещен")
         return
@@ -813,6 +812,26 @@ async def unban_menu(callback_query: types.CallbackQuery):
         "🔓 Введите ID пользователя, которого хотите разблокировать:"
     )
     await callback_query.answer()
+
+@dp.message_handler(state=AdminStates.waiting_for_user_id_unban)
+async def process_unban(message: types.Message, state: FSMContext):
+    try:
+        user_id = int(message.text.strip())
+        cursor.execute('UPDATE users SET is_banned = 0 WHERE tg_id = ?', (user_id,))
+        conn.commit()
+        
+        if cursor.rowcount > 0:
+            await message.answer(f"✅ Пользователь {user_id} разблокирован")
+            try:
+                await bot.send_message(user_id, "✅ Вы разблокированы администратором")
+            except:
+                pass
+        else:
+            await message.answer("❌ Пользователь не найден или не был заблокирован")
+    except ValueError:
+        await message.answer("❌ Неверный формат ID")
+    
+    await state.finish()
 
 @dp.message_handler(lambda message: message.text == "📊 Статистика")
 async def admin_stats(message: types.Message):
