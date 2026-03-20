@@ -377,12 +377,15 @@ async def approve_post(callback_query: types.CallbackQuery):
 
     post_id = int(callback_query.data.split('_')[1])
     cursor.execute('''
-        SELECT p.*, u.* FROM posts p
+        SELECT
+            p.id, p.text, p.media_type, p.media_id, p.is_anonymous, p.status,
+            u.tg_id, u.username, u.first_name
+        FROM posts p
         JOIN users u ON p.user_id = u.id
         WHERE p.id = ?
     ''', (post_id,))
     post_data = cursor.fetchone()
-    if not post_data or post_data[6] != 'pending':
+    if not post_data or post_data[5] != 'pending':
         await callback_query.answer("Пост уже обработан", show_alert=True)
         return
 
@@ -391,19 +394,22 @@ async def approve_post(callback_query: types.CallbackQuery):
                    (callback_query.from_user.id, post_id))
     conn.commit()
 
-    # p.* (11 колонок) + u.* => user начинается с индекса 11
-    user_data = post_data[11:]
-    formatted_text = format_post_text(post_data[2], user_data, bool(post_data[5]))
+    post_text = post_data[1]
+    media_type = (post_data[2] or "").strip().lower()
+    media_id = post_data[3]
+    is_anonymous = bool(post_data[4])
+    user_data = (None, post_data[6], post_data[7], post_data[8])
+    formatted_text = format_post_text(post_text, user_data, is_anonymous)
 
     try:
-        if post_data[3] == 'photo':
-            await bot.send_photo(CHANNEL_ID, post_data[4], caption=formatted_text, parse_mode="HTML")
-        elif post_data[3] == 'video':
-            await bot.send_video(CHANNEL_ID, post_data[4], caption=formatted_text, parse_mode="HTML")
+        if media_type == 'photo' and media_id:
+            await bot.send_photo(CHANNEL_ID, media_id, caption=formatted_text, parse_mode="HTML")
+        elif media_type == 'video' and media_id:
+            await bot.send_video(CHANNEL_ID, media_id, caption=formatted_text, parse_mode="HTML")
         else:
             await bot.send_message(CHANNEL_ID, formatted_text, parse_mode="HTML")
 
-        await bot.send_message(user_data[1], f"✅ Ваш пост #{post_id} опубликован в канале!")
+        await bot.send_message(post_data[6], f"✅ Ваш пост #{post_id} опубликован в канале!")
         admin_source_text = callback_query.message.text or callback_query.message.caption or ""
         await bot.edit_message_text(
             f"✅ <b>Пост #{post_id} одобрен</b> @{callback_query.from_user.username}\n\n{admin_source_text}",
@@ -426,12 +432,13 @@ async def reject_post(callback_query: types.CallbackQuery):
 
     post_id = int(callback_query.data.split('_')[1])
     cursor.execute('''
-        SELECT p.*, u.* FROM posts p
+        SELECT p.id, p.status, u.tg_id
+        FROM posts p
         JOIN users u ON p.user_id = u.id
         WHERE p.id = ?
     ''', (post_id,))
     post_data = cursor.fetchone()
-    if not post_data or post_data[6] != 'pending':
+    if not post_data or post_data[1] != 'pending':
         await callback_query.answer("Пост уже обработан", show_alert=True)
         return
 
@@ -440,7 +447,7 @@ async def reject_post(callback_query: types.CallbackQuery):
                    (callback_query.from_user.id, post_id))
     conn.commit()
 
-    user_tg_id = post_data[12]
+    user_tg_id = post_data[2]
     await bot.send_message(user_tg_id, f"❌ Ваш пост #{post_id} отклонён.")
     admin_source_text = callback_query.message.text or callback_query.message.caption or ""
     await bot.edit_message_text(
