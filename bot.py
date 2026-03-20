@@ -1,20 +1,20 @@
 import asyncio
 import logging
 import sqlite3
-from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types, executor
 from aiogram.contrib.middlewares.logging import LoggingMiddleware
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import config
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
 # Инициализация бота
-bot = Bot(token=config.BOT_TOKEN)
+bot = Bot(token=config.BOT_TOKEN, parse_mode=types.ParseMode.HTML)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 dp.middleware.setup(LoggingMiddleware())
@@ -159,11 +159,11 @@ def format_post_text(post_text, user, is_anonymous):
     if is_anonymous:
         author_line = "👤 Автор: Анонимно"
     else:
-        author_line = f"👤 Автор: {user[3]}"  # first_name
-        if user[2]:  # username
+        author_line = f"👤 Автор: {user[3]}"
+        if user[2]:
             author_line += f" (@{user[2]})"
     
-    suggest_link = f"[📢 | Предложить пост](https://t.me/{bot_username})"
+    suggest_link = f"<a href='https://t.me/{bot_username}'>📢 | Предложить пост</a>"
     
     return f"{post_text}\n\n{author_line}\n\n{suggest_link}"
 
@@ -174,29 +174,55 @@ def is_admin(user_id):
 
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    user = get_or_create_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
-    
-    welcome_text = (
-        f"👋 Привет, {message.from_user.first_name}!\n\n"
-        f"Я бот для предложения постов в канал.\n\n"
-        f"📝 Чтобы предложить пост, нажми кнопку «Предложить пост»\n"
-        f"🆘 Если есть вопросы или проблемы — нажми «Поддержка»\n"
-        f"ℹ️ Подробнее о работе бота — «Помощь»\n\n"
-        f"Все посты проходят модерацию перед публикацией."
-    )
-    
-    await message.answer(welcome_text, reply_markup=get_main_keyboard())
-    
-    # Если пользователь администратор, показываем кнопку входа в админку
-    if is_admin(message.from_user.id):
-        admin_button = ReplyKeyboardMarkup(resize_keyboard=True).add(
-            KeyboardButton("👑 Админ-панель")
+    try:
+        user = get_or_create_user(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name
         )
-        await message.answer("🔐 У вас есть доступ к админ-панели", reply_markup=admin_button)
+        
+        welcome_text = (
+            f"👋 Привет, {message.from_user.first_name}!\n\n"
+            f"Я бот для предложения постов в канал.\n\n"
+            f"📝 Чтобы предложить пост, нажми кнопку «Предложить пост»\n"
+            f"🆘 Если есть вопросы или проблемы — нажми «Поддержка»\n"
+            f"ℹ️ Подробнее о работе бота — «Помощь»\n\n"
+            f"Все посты проходят модерацию перед публикацией."
+        )
+        
+        await message.answer(welcome_text, reply_markup=get_main_keyboard())
+        
+        # Если пользователь администратор, показываем кнопку входа в админку
+        if is_admin(message.from_user.id):
+            admin_button = ReplyKeyboardMarkup(resize_keyboard=True).add(
+                KeyboardButton("👑 Админ-панель")
+            )
+            await message.answer("🔐 У вас есть доступ к админ-панели", reply_markup=admin_button)
+            
+    except Exception as e:
+        logging.error(f"Error in start: {e}")
+        await message.answer("Произошла ошибка. Попробуйте позже.")
+
+@dp.message_handler(commands=['help'])
+async def cmd_help(message: types.Message):
+    help_text = (
+        "ℹ️ <b>Помощь по боту</b>\n\n"
+        "<b>📝 Предложить пост</b>\n"
+        "• Отправьте текст, фото или видео\n"
+        "• Выберите анонимность\n"
+        "• Дождитесь модерации\n\n"
+        "<b>📊 Мои посты</b>\n"
+        "• Просмотр статуса ваших постов\n\n"
+        "<b>🆘 Поддержка</b>\n"
+        "• Связь с администрацией\n"
+        "• Решение проблем и вопросов\n\n"
+        "<b>❓ Частые вопросы:</b>\n"
+        "• Посты проходят модерацию до 24 часов\n"
+        "• При нарушении правил пост может быть отклонен\n"
+        "• По всем вопросам обращайтесь в поддержку"
+    )
+    
+    await message.answer(help_text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 @dp.message_handler(lambda message: message.text == "👑 Админ-панель")
 async def admin_panel(message: types.Message):
@@ -205,10 +231,9 @@ async def admin_panel(message: types.Message):
         return
     
     await message.answer(
-        "👑 **Админ-панель**\n\n"
-        "Выберите действие:",
+        "👑 <b>Админ-панель</b>\n\nВыберите действие:",
         reply_markup=get_admin_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 @dp.message_handler(lambda message: message.text == "🔙 Выйти из админки")
@@ -220,31 +245,35 @@ async def exit_admin(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "📝 Предложить пост")
 async def suggest_post(message: types.Message):
-    user = get_or_create_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
-    
-    if user[4]:  # is_banned
+    try:
+        user = get_or_create_user(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name
+        )
+        
+        if user[4]:  # is_banned
+            await message.answer(
+                "⛔ Вы забанены и не можете отправлять посты.\n"
+                "Для выяснения причин обратитесь в поддержку."
+            )
+            return
+        
+        await PostStates.waiting_for_content.set()
         await message.answer(
-            "⛔ Вы забанены и не можете отправлять посты.\n"
-            "Для выяснения причин обратитесь в поддержку."
+            "📝 Отправьте текст или медиа для поста.\n\n"
+            "Вы можете отправить:\n"
+            "• Текст\n"
+            "• Фото\n"
+            "• Видео\n\n"
+            "Для отмены нажмите «❌ Отмена»",
+            reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(
+                KeyboardButton("❌ Отмена")
+            )
         )
-        return
-    
-    await PostStates.waiting_for_content.set()
-    await message.answer(
-        "📝 Отправьте текст или медиа для поста.\n\n"
-        "Вы можете отправить:\n"
-        "• Текст\n"
-        "• Фото\n"
-        "• Видео\n\n"
-        "Для отмены нажмите «❌ Отмена»",
-        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(
-            KeyboardButton("❌ Отмена")
-        )
-    )
+    except Exception as e:
+        logging.error(f"Error in suggest_post: {e}")
+        await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.message_handler(content_types=['text', 'photo', 'video'], state=PostStates.waiting_for_content)
 async def process_content(message: types.Message, state: FSMContext):
@@ -397,11 +426,11 @@ async def approve_post(callback_query: types.CallbackQuery):
     
     try:
         if post_data[4] == 'photo':
-            await bot.send_photo(CHANNEL_ID, post_data[5], caption=formatted_text, parse_mode="Markdown")
+            await bot.send_photo(CHANNEL_ID, post_data[5], caption=formatted_text, parse_mode="HTML")
         elif post_data[4] == 'video':
-            await bot.send_video(CHANNEL_ID, post_data[5], caption=formatted_text, parse_mode="Markdown")
+            await bot.send_video(CHANNEL_ID, post_data[5], caption=formatted_text, parse_mode="HTML")
         else:
-            await bot.send_message(CHANNEL_ID, formatted_text, parse_mode="Markdown")
+            await bot.send_message(CHANNEL_ID, formatted_text, parse_mode="HTML")
         
         await bot.send_message(user_data[1], f"✅ Ваш пост #{post_id} опубликован в канале!")
         
@@ -415,6 +444,8 @@ async def approve_post(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await callback_query.answer("Ошибка публикации")
+    
+    await callback_query.message.edit_reply_markup()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('reject_'))
 async def reject_post(callback_query: types.CallbackQuery):
@@ -449,6 +480,7 @@ async def reject_post(callback_query: types.CallbackQuery):
     )
     
     await callback_query.answer("Пост отклонён")
+    await callback_query.message.edit_reply_markup()
 
 @dp.message_handler(lambda message: message.text == "📊 Мои посты")
 async def my_posts(message: types.Message):
@@ -475,13 +507,13 @@ async def my_posts(message: types.Message):
         'rejected': '❌'
     }
     
-    text = "📊 **Ваши последние посты:**\n\n"
+    text = "📊 <b>Ваши последние посты:</b>\n\n"
     for post in posts:
         status_text = status_emoji.get(post[1], '❓')
         date = post[2][:10]
         text += f"{status_text} Пост #{post[0]} - {date}\n"
     
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message_handler(lambda message: message.text == "🆘 Поддержка")
 async def support(message: types.Message):
@@ -490,14 +522,14 @@ async def support(message: types.Message):
     keyboard.add(KeyboardButton("🔙 Назад"))
     
     await message.answer(
-        "🆘 **Раздел поддержки**\n\n"
+        "🆘 <b>Раздел поддержки</b>\n\n"
         "Если у вас есть вопросы, проблемы или жалобы:\n"
         "• Нажмите «Написать в поддержку» и отправьте сообщение\n"
         "• Администраторы свяжутся с вами в ближайшее время\n\n"
         "Также вы можете обратиться напрямую:\n"
-        f"👥 **Администрация канала**\n"
+        f"👥 <b>Администрация канала</b>\n"
         f"{config.ADMIN_CONTACTS}",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=keyboard
     )
 
@@ -604,9 +636,9 @@ async def process_support_response(message: types.Message, state: FSMContext):
     # Отправляем ответ пользователю
     await bot.send_message(
         data['user_tg_id'],
-        f"🆘 **Ответ от администрации**\n\n{message.text}\n\n"
+        f"🆘 <b>Ответ от администрации</b>\n\n{message.text}\n\n"
         f"Если остались вопросы, напишите снова в поддержку.",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     
     await state.finish()
@@ -618,24 +650,7 @@ async def back_to_main(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "ℹ️ Помощь")
 async def show_help(message: types.Message):
-    help_text = (
-        "ℹ️ **Помощь по боту**\n\n"
-        "**📝 Предложить пост**\n"
-        "• Отправьте текст, фото или видео\n"
-        "• Выберите анонимность\n"
-        "• Дождитесь модерации\n\n"
-        "**📊 Мои посты**\n"
-        "• Просмотр статуса ваших постов\n\n"
-        "**🆘 Поддержка**\n"
-        "• Связь с администрацией\n"
-        "• Решение проблем и вопросов\n\n"
-        "**❓ Частые вопросы:**\n"
-        "• Посты проходят модерацию до 24 часов\n"
-        "• При нарушении правил пост может быть отклонен\n"
-        "• По всем вопросам обращайтесь в поддержку"
-    )
-    
-    await message.answer(help_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await cmd_help(message)
 
 # Админские функции
 @dp.message_handler(lambda message: message.text == "📋 Ожидающие посты")
@@ -663,10 +678,10 @@ async def admin_approved_posts(message: types.Message):
     total = cursor.fetchone()[0]
     
     await message.answer(
-        f"✅ **Статистика одобренных постов**\n\n"
+        f"✅ <b>Статистика одобренных постов</b>\n\n"
         f"📅 Сегодня: {today}\n"
         f"📊 Всего: {total}",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 @dp.message_handler(lambda message: message.text == "👥 Управление админами")
@@ -677,12 +692,12 @@ async def manage_admins(message: types.Message):
     cursor.execute('SELECT tg_id, first_name, username FROM users WHERE is_admin = 1')
     admins = cursor.fetchall()
     
-    text = "👥 **Список администраторов:**\n\n"
+    text = "👥 <b>Список администраторов:</b>\n\n"
     for admin in admins:
         text += f"• {admin[1]}"
         if admin[2]:
             text += f" (@{admin[2]})"
-        text += f" - ID: `{admin[0]}`\n"
+        text += f" - ID: <code>{admin[0]}</code>\n"
     
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
@@ -690,7 +705,7 @@ async def manage_admins(message: types.Message):
         InlineKeyboardButton("➖ Удалить админа", callback_data="remove_admin")
     )
     
-    await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data == "add_admin")
 async def add_admin_prompt(callback_query: types.CallbackQuery, state: FSMContext):
@@ -787,19 +802,19 @@ async def banned_users(message: types.Message):
         await message.answer("📭 Нет заблокированных пользователей")
         return
     
-    text = "🚫 **Заблокированные пользователи:**\n\n"
+    text = "🚫 <b>Заблокированные пользователи:</b>\n\n"
     for user in banned:
         text += f"• {user[1]}"
         if user[2]:
             text += f" (@{user[2]})"
-        text += f" - ID: `{user[0]}`\n"
+        text += f" - ID: <code>{user[0]}</code>\n"
     
     keyboard = InlineKeyboardMarkup()
     keyboard.add(
         InlineKeyboardButton("🔓 Разблокировать", callback_data="unban_menu")
     )
     
-    await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data == "unban_menu")
 async def unban_menu(callback_query: types.CallbackQuery, state: FSMContext):
@@ -857,7 +872,7 @@ async def admin_stats(message: types.Message):
     pending_support = cursor.fetchone()[0]
     
     stats_text = (
-        f"📊 **Статистика бота**\n\n"
+        f"📊 <b>Статистика бота</b>\n\n"
         f"✅ Одобрено: {total_approved}\n"
         f"⏳ Ожидает: {total_pending}\n"
         f"❌ Отклонено: {total_rejected}\n"
@@ -866,7 +881,7 @@ async def admin_stats(message: types.Message):
         f"🆘 Запросов поддержки: {pending_support}"
     )
     
-    await message.answer(stats_text, parse_mode="Markdown")
+    await message.answer(stats_text, parse_mode="HTML")
 
 @dp.message_handler(lambda message: message.text == "🆘 Запросы поддержки")
 async def support_requests(message: types.Message):
@@ -888,7 +903,7 @@ async def support_requests(message: types.Message):
     
     for req in requests:
         text = (
-            f"🆘 **Запрос #{req[0]}**\n"
+            f"🆘 <b>Запрос #{req[0]}</b>\n"
             f"👤 От: {req[3]}"
         )
         if req[4]:
@@ -900,7 +915,7 @@ async def support_requests(message: types.Message):
             InlineKeyboardButton("📝 Ответить", callback_data=f"reply_support_{req[0]}")
         )
         
-        await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 @dp.message_handler(commands=['ban'])
 async def ban_user(message: types.Message):
@@ -962,14 +977,14 @@ async def admin_list(message: types.Message):
     cursor.execute('SELECT tg_id, first_name, username FROM users WHERE is_admin = 1')
     admins = cursor.fetchall()
     
-    text = "👥 **Список администраторов:**\n\n"
+    text = "👥 <b>Список администраторов:</b>\n\n"
     for admin in admins:
         text += f"• {admin[1]}"
         if admin[2]:
             text += f" (@{admin[2]})"
-        text += f" - `{admin[0]}`\n"
+        text += f" - <code>{admin[0]}</code>\n"
     
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message_handler(commands=['cancel'], state='*')
 async def cancel_command(message: types.Message, state: FSMContext):
@@ -977,5 +992,5 @@ async def cancel_command(message: types.Message, state: FSMContext):
     await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
 
 if __name__ == '__main__':
-    from aiogram import executor
+    # Запуск бота
     executor.start_polling(dp, skip_updates=True)
