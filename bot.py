@@ -16,7 +16,7 @@ BOT_TOKEN = "8460789866:AAHPtTNzZo_lmlECcBeWq_CEUsxQwejfSWc"
 BOT_USERNAME = "podsl49_bot"
 CHANNEL_ID = -1003572107512
 ADMIN_CHAT_ID = -1003636427960
-MAIN_ADMIN_IDS = [6042290296, 7412555136, 5775839902]   # ID главных администраторов
+MAIN_ADMIN_IDS = [6042290296, 7412555136, 5775839902]
 ADMIN_CONTACTS = "💬 Telegram: @dlua0podsl"
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
@@ -37,7 +37,6 @@ dp.middleware.setup(LoggingMiddleware())
 conn = sqlite3.connect('bot_database.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# Создание таблиц
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,14 +104,16 @@ def get_or_create_user(tg_id, username, first_name):
         conn.commit()
         cursor.execute('SELECT * FROM users WHERE tg_id = ?', (tg_id,))
         user = cursor.fetchone()
+    else:
+        # Обновляем данные пользователя при каждом обращении (имя/юзернейм могли измениться)
+        if user[2] != username or user[3] != first_name:
+            cursor.execute('''
+                UPDATE users SET username = ?, first_name = ? WHERE tg_id = ?
+            ''', (username, first_name, tg_id))
+            conn.commit()
+            cursor.execute('SELECT * FROM users WHERE tg_id = ?', (tg_id,))
+            user = cursor.fetchone()
     return user
-
-def update_admins_from_list():
-    """Принудительно обновляет права администраторов из MAIN_ADMIN_IDS"""
-    for admin_id in MAIN_ADMIN_IDS:
-        cursor.execute('UPDATE users SET is_admin = 1 WHERE tg_id = ?', (admin_id,))
-    conn.commit()
-    logger.info("Права администраторов обновлены из MAIN_ADMIN_IDS")
 
 def is_admin(user_id):
     cursor.execute('SELECT is_admin FROM users WHERE tg_id = ?', (user_id,))
@@ -120,13 +121,16 @@ def is_admin(user_id):
     return result and result[0] == 1
 
 def format_post_text(post_text, user, is_anonymous):
+    """Форматирует текст поста для публикации в канале"""
     if is_anonymous:
         author_line = "👤 Автор: Анонимно"
     else:
-        author_line = f"👤 Автор: {user[3]}"
+        display_name = user[3] if user[3] else "Пользователь"
+        author_line = f"👤 Автор: {display_name}"
         if user[2]:
             author_line += f" (@{user[2]})"
-    suggest_link = f"<a href='https://t.me/{BOT_USERNAME}'>📢 | Предложить пост</a>"
+    # HTML-ссылка на бота
+    suggest_link = f'<a href="https://t.me/{BOT_USERNAME}">📢 | Предложить пост</a>'
     return f"{post_text}\n\n{author_line}\n\n{suggest_link}"
 
 # ========== КЛАВИАТУРЫ ==========
@@ -235,7 +239,7 @@ async def suggest_post(message: types.Message):
             message.from_user.username,
             message.from_user.first_name
         )
-        if user[4]:  # is_banned
+        if user[4]:
             await message.answer("⛔ Вы забанены и не можете отправлять посты.")
             return
 
@@ -302,6 +306,7 @@ async def process_anonymous_choice(message: types.Message, state: FSMContext):
         message.from_user.first_name
     )
 
+    # Сохраняем пост
     cursor.execute('''
         INSERT INTO posts (user_id, text, media_type, media_id, is_anonymous)
         VALUES (?, ?, ?, ?, ?)
@@ -309,16 +314,17 @@ async def process_anonymous_choice(message: types.Message, state: FSMContext):
     conn.commit()
     post_id = cursor.lastrowid
 
-    admin_text = f"📝 Новый пост #{post_id}\n"
+    # Формируем сообщение для админ-чата с HTML-форматированием
+    admin_text = f"<b>📝 Новый пост #{post_id}</b>\n\n"
     if is_anonymous:
-        admin_text += "👤 Автор: АНОНИМНО\n"
+        admin_text += "<b>👤 Автор:</b> АНОНИМНО\n"
     else:
-        admin_text += f"👤 Автор: {user[3]}"
+        admin_text += f"<b>👤 Автор:</b> {user[3]}"
         if user[2]:
             admin_text += f" (@{user[2]})"
         admin_text += "\n"
-    admin_text += f"🔒 Анонимно: {'Да' if is_anonymous else 'Нет'}\n\n"
-    admin_text += f"📄 Текст:\n{data['text']}\n"
+    admin_text += f"<b>🔒 Анонимно:</b> {'Да' if is_anonymous else 'Нет'}\n\n"
+    admin_text += f"<b>📄 Текст:</b>\n{data['text']}\n"
 
     admin_keyboard = InlineKeyboardMarkup(row_width=2)
     admin_keyboard.add(
@@ -332,20 +338,23 @@ async def process_anonymous_choice(message: types.Message, state: FSMContext):
                 ADMIN_CHAT_ID,
                 data['media_id'],
                 caption=admin_text,
-                reply_markup=admin_keyboard
+                reply_markup=admin_keyboard,
+                parse_mode="HTML"
             )
         elif data.get('media_type') == 'video':
             admin_msg = await bot.send_video(
                 ADMIN_CHAT_ID,
                 data['media_id'],
                 caption=admin_text,
-                reply_markup=admin_keyboard
+                reply_markup=admin_keyboard,
+                parse_mode="HTML"
             )
         else:
             admin_msg = await bot.send_message(
                 ADMIN_CHAT_ID,
                 admin_text,
-                reply_markup=admin_keyboard
+                reply_markup=admin_keyboard,
+                parse_mode="HTML"
             )
         cursor.execute('UPDATE posts SET admin_chat_message_id = ? WHERE id = ?',
                        (admin_msg.message_id, post_id))
@@ -381,7 +390,7 @@ async def approve_post(callback_query: types.CallbackQuery):
                    (callback_query.from_user.id, post_id))
     conn.commit()
 
-    user_data = post_data[9:]
+    user_data = post_data[9:]  # данные пользователя
     formatted_text = format_post_text(post_data[3], user_data, bool(post_data[5]))
 
     try:
@@ -394,9 +403,10 @@ async def approve_post(callback_query: types.CallbackQuery):
 
         await bot.send_message(user_data[1], f"✅ Ваш пост #{post_id} опубликован в канале!")
         await bot.edit_message_text(
-            f"✅ Пост #{post_id} одобрен @{callback_query.from_user.username}\n\n{callback_query.message.text}",
+            f"✅ <b>Пост #{post_id} одобрен</b> @{callback_query.from_user.username}\n\n{callback_query.message.text}",
             ADMIN_CHAT_ID,
-            callback_query.message.message_id
+            callback_query.message.message_id,
+            parse_mode="HTML"
         )
         await callback_query.answer("Пост опубликован")
     except Exception as e:
@@ -429,9 +439,10 @@ async def reject_post(callback_query: types.CallbackQuery):
 
     await bot.send_message(post_data[10], f"❌ Ваш пост #{post_id} отклонён.")
     await bot.edit_message_text(
-        f"❌ Пост #{post_id} отклонён @{callback_query.from_user.username}\n\n{callback_query.message.text}",
+        f"❌ <b>Пост #{post_id} отклонён</b> @{callback_query.from_user.username}\n\n{callback_query.message.text}",
         ADMIN_CHAT_ID,
-        callback_query.message.message_id
+        callback_query.message.message_id,
+        parse_mode="HTML"
     )
     await callback_query.answer("Пост отклонён")
     await callback_query.message.edit_reply_markup()
@@ -500,25 +511,24 @@ async def process_support_message(message: types.Message, state: FSMContext):
     request_id = cursor.lastrowid
 
     admin_text = (
-        f"🆘 Новый запрос в поддержку #{request_id}\n"
-        f"👤 От: {user[3]}"
+        f"<b>🆘 Новый запрос в поддержку #{request_id}</b>\n\n"
+        f"<b>👤 От:</b> {user[3]}"
     )
     if user[2]:
         admin_text += f" (@{user[2]})"
-    admin_text += f"\n📝 Сообщение:\n{message.text}"
+    admin_text += f"\n<b>📝 Сообщение:</b>\n{message.text}"
 
     admin_keyboard = InlineKeyboardMarkup().add(
         InlineKeyboardButton("📝 Ответить", callback_data=f"reply_support_{request_id}")
     )
     try:
-        await bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=admin_keyboard)
+        await bot.send_message(ADMIN_CHAT_ID, admin_text, reply_markup=admin_keyboard, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Не удалось отправить запрос поддержки в админ-чат: {e}")
 
     await state.finish()
     await message.answer("✅ Сообщение отправлено! Администраторы ответят.", reply_markup=get_main_keyboard())
 
-# ========== ОБРАБОТЧИК ОТВЕТА НА ПОДДЕРЖКУ ==========
 @dp.callback_query_handler(lambda c: c.data.startswith('reply_support_'))
 async def reply_to_support(callback_query: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback_query.from_user.id):
@@ -536,7 +546,6 @@ async def reply_to_support(callback_query: types.CallbackQuery, state: FSMContex
         await callback_query.answer("Запрос не найден")
         return
 
-    # Сохраняем request_id и user_tg_id в состояние
     await AdminStates.waiting_for_support_response.set()
     await state.update_data(request_id=request_id, user_tg_id=request[6])
     await callback_query.message.answer(
@@ -544,14 +553,12 @@ async def reply_to_support(callback_query: types.CallbackQuery, state: FSMContex
     )
     await callback_query.answer()
 
-# ========== ОТПРАВКА ОТВЕТА ПОЛЬЗОВАТЕЛЮ ==========
 @dp.message_handler(state=AdminStates.waiting_for_support_response)
 async def process_support_response(message: types.Message, state: FSMContext):
     data = await state.get_data()
     request_id = data['request_id']
     user_tg_id = data.get('user_tg_id')
 
-    # Если user_tg_id не сохранён, достаём из БД
     if not user_tg_id:
         cursor.execute('''
             SELECT u.tg_id FROM support_requests sr
@@ -589,10 +596,8 @@ async def process_support_response(message: types.Message, state: FSMContext):
 # ========== КНОПКА "НАЗАД" ==========
 @dp.message_handler(lambda message: message.text == "🔙 Назад")
 async def back_to_main(message: types.Message):
-    # Возвращаем главное меню
     await message.answer("Главное меню", reply_markup=get_main_keyboard())
 
-# ========== ПОМОЩЬ (КНОПКА) ==========
 @dp.message_handler(lambda message: message.text == "ℹ️ Помощь")
 async def show_help(message: types.Message):
     await cmd_help(message)
@@ -770,11 +775,10 @@ async def support_requests_admin(message: types.Message):
         await message.answer("📭 Нет активных запросов")
         return
     for req in requests:
-        text = f"🆘 Запрос #{req[0]}\n👤 От: {req[3]}" + (f" (@{req[4]})" if req[4] else "") + f"\n📅 {req[2][:19]}\n\n{req[1]}"
+        text = f"<b>🆘 Запрос #{req[0]}</b>\n<b>👤 От:</b> {req[3]}" + (f" (@{req[4]})" if req[4] else "") + f"\n<b>📅</b> {req[2][:19]}\n\n{req[1]}"
         keyboard = InlineKeyboardMarkup().add(InlineKeyboardButton("📝 Ответить", callback_data=f"reply_support_{req[0]}"))
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
-# ========== ОТМЕНА ==========
 @dp.message_handler(commands=['cancel'], state='*')
 async def cancel_command(message: types.Message, state: FSMContext):
     await state.finish()
@@ -782,7 +786,9 @@ async def cancel_command(message: types.Message, state: FSMContext):
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
-    # Принудительно обновляем права администраторов из списка
-    update_admins_from_list()
+    # Принудительно обновляем права администраторов
+    for admin_id in MAIN_ADMIN_IDS:
+        cursor.execute('UPDATE users SET is_admin = 1 WHERE tg_id = ?', (admin_id,))
+    conn.commit()
     logger.info("Бот запущен")
     executor.start_polling(dp, skip_updates=True)
