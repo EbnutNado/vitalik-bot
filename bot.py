@@ -396,9 +396,9 @@ async def approve_post(callback_query: types.CallbackQuery):
     formatted_text = format_post_text(post_data[2], user_data, bool(post_data[5]))
 
     try:
-        if post_data[4] == 'photo':
+        if post_data[3] == 'photo':
             await bot.send_photo(CHANNEL_ID, post_data[4], caption=formatted_text, parse_mode="HTML")
-        elif post_data[4] == 'video':
+        elif post_data[3] == 'video':
             await bot.send_video(CHANNEL_ID, post_data[4], caption=formatted_text, parse_mode="HTML")
         else:
             await bot.send_message(CHANNEL_ID, formatted_text, parse_mode="HTML")
