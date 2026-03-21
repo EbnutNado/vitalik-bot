@@ -1,14 +1,18 @@
 import logging
+import os
 import sqlite3
 import sys
+import tempfile
 import traceback
-from datetime import datetime
+import json
+import re
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.middlewares.logging import LoggingMiddleware
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
 from aiogram.utils import executor
 from html import escape
 
@@ -19,6 +23,7 @@ CHANNEL_ID = -1003572107512
 ADMIN_CHAT_ID = -1003636427960
 MAIN_ADMIN_IDS = [6042290296, 7412555136, 5775839902]
 ADMIN_CONTACTS = "💬 Telegram: @podslyshano499"
+DB_PATH = "bot_database.db"
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
@@ -28,6 +33,67 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ========== АНТИСПАМ И ЦЕНЗУРА ==========
+MAX_MEDIA_COUNT = 10
+SPAM_COOLDOWN_SECONDS = 60
+last_submit_times = {}
+
+# Базовый список запрещенных слов (можно расширять)
+BANNED_WORD_PATTERNS = [
+    r"\bхуй\w*\b",
+    r"\bпизд\w*\b",
+    r"\bеб\w*\b",
+    r"\bебал\w*\b",
+    r"\bебан\w*\b",
+    r"\bбля\w*\b",
+    r"\bсука\w*\b",
+    r"\bматьеб\w*\b",
+    r"\bfuck\w*\b",
+    r"\bshit\w*\b",
+]
+
+LOOKALIKE_MAP = str.maketrans({
+    "a": "а", "b": "б", "c": "с", "e": "е", "k": "к", "m": "м", "h": "н", "o": "о",
+    "p": "р", "t": "т", "x": "х", "y": "у", "r": "г", "i": "и", "l": "л", "n": "п",
+    "3": "з", "4": "ч", "6": "б", "0": "о", "1": "л",
+    "@": "а", "$": "с",
+})
+
+def normalize_for_filter(text: str) -> str:
+    normalized = (text or "").lower().translate(LOOKALIKE_MAP).replace("ё", "е")
+    # Убираем все, кроме букв/цифр/пробелов, чтобы "бл*я-ть" тоже ловилось
+    normalized = re.sub(r"[^a-zа-я0-9\s]", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+def find_banned_fragment(text: str) -> str:
+    if not text:
+        return ""
+    normalized_text = normalize_for_filter(text)
+    compact_text = normalized_text.replace(" ", "")
+    for pattern in BANNED_WORD_PATTERNS:
+        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
+        if match:
+            return match.group(0)
+        # Повторная проверка без пробелов против обходов типа "ма т ь е б а л"
+        compact_pattern = pattern.replace(r"\b", "").replace(r"\w*", r"[а-яa-z0-9]*")
+        match_compact = re.search(compact_pattern, compact_text, flags=re.IGNORECASE)
+        if match_compact:
+            return match_compact.group(0)
+    return ""
+
+def is_spam_blocked(user_tg_id: int, user_db_id: int):
+    now = datetime.utcnow()
+    last_time = last_submit_times.get(user_tg_id)
+    if last_time and (now - last_time).total_seconds() < SPAM_COOLDOWN_SECONDS:
+        seconds_left = SPAM_COOLDOWN_SECONDS - int((now - last_time).total_seconds())
+        return True, f"⏱ Подождите {seconds_left} сек. перед следующей отправкой."
+
+    return False, ""
+
+def mark_submit_time(user_tg_id: int):
+    last_submit_times[user_tg_id] = datetime.utcnow()
+
 # ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 storage = MemoryStorage()
@@ -35,7 +101,7 @@ dp = Dispatcher(bot, storage=storage)
 dp.middleware.setup(LoggingMiddleware())
 
 # ========== БАЗА ДАННЫХ ==========
-conn = sqlite3.connect('bot_database.db', check_same_thread=False)
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute('''
@@ -91,6 +157,23 @@ CREATE TABLE IF NOT EXISTS support_requests (
 ''')
 conn.commit()
 logger.info("База данных инициализирована")
+
+def create_database_backup_file():
+    """Согласованная копия SQLite (backup API), пока основное соединение открыто."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    backup_conn = sqlite3.connect(path)
+    try:
+        conn.backup(backup_conn)
+    except Exception:
+        backup_conn.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    backup_conn.close()
+    return path
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def get_or_create_user(tg_id, username, first_name):
@@ -168,6 +251,7 @@ def get_admin_keyboard():
         KeyboardButton("📊 Статистика"),
         KeyboardButton("🆘 Запросы поддержки")
     )
+    keyboard.add(KeyboardButton("💾 Бэкап базы"))
     keyboard.add(
         KeyboardButton("🔙 Выйти из админки")
     )
@@ -245,13 +329,16 @@ async def suggest_post(message: types.Message):
             return
 
         await PostStates.waiting_for_content.set()
+        await dp.current_state(user=message.from_user.id).update_data(text="", media_items=[])
         await message.answer(
-            "📝 Отправьте текст или медиа для поста.\n\n"
-            "Вы можете отправить: текст, фото или видео.\n"
-            "Для отмены нажмите «❌ Отмена»",
-            reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(
+            "📝 Отправьте контент для поста.\n\n"
+            f"Можно прикрепить до {MAX_MEDIA_COUNT} фото/видео.\n"
+            "Когда закончите, нажмите «✅ Готово отправить».\n"
+            "Для отмены: «❌ Отмена».",
+            reply_markup=ReplyKeyboardMarkup(resize_keyboard=True, row_width=2).add(
+                KeyboardButton("✅ Готово отправить"),
                 KeyboardButton("❌ Отмена")
-            )
+            ),
         )
     except Exception as e:
         logger.error(f"Ошибка в suggest_post: {e}\n{traceback.format_exc()}")
@@ -264,26 +351,66 @@ async def process_content(message: types.Message, state: FSMContext):
         await message.answer("❌ Отменено", reply_markup=get_main_keyboard())
         return
 
-    if message.text:
-        await state.update_data(text=message.text, media_type=None, media_id=None)
-    elif message.photo:
-        await state.update_data(
-            text=message.caption or "",
-            media_type='photo',
-            media_id=message.photo[-1].file_id
-        )
-    elif message.video:
-        await state.update_data(
-            text=message.caption or "",
-            media_type='video',
-            media_id=message.video.file_id
-        )
+    data = await state.get_data()
+    text_value = data.get("text", "")
+    media_items = data.get("media_items", [])
 
-    await PostStates.waiting_for_anonymous_choice.set()
-    await message.answer(
-        "🔒 Выберите вариант публикации:",
-        reply_markup=get_anonymous_keyboard()
-    )
+    if message.text and message.text == "✅ Готово отправить":
+        if not text_value and not media_items:
+            await message.answer("Добавьте текст или медиа перед отправкой.")
+            return
+        await PostStates.waiting_for_anonymous_choice.set()
+        await message.answer("🔒 Выберите вариант публикации:", reply_markup=get_anonymous_keyboard())
+        return
+
+    if message.text:
+        merged_text = f"{text_value}\n{message.text}".strip() if text_value else message.text
+        banned = find_banned_fragment(merged_text)
+        if banned:
+            await message.answer(
+                f"🚫 Обнаружено запрещенное слово: <code>{escape(banned)}</code>.\n"
+                "Исправьте текст и отправьте снова.",
+                parse_mode="HTML"
+            )
+            return
+        await state.update_data(text=merged_text)
+        await message.answer("Текст добавлен. Нажмите «✅ Готово отправить», когда будете готовы.")
+    elif message.photo:
+        if len(media_items) >= MAX_MEDIA_COUNT:
+            await message.answer(f"Можно прикрепить максимум {MAX_MEDIA_COUNT} медиа.")
+            return
+        caption = (message.caption or "").strip()
+        banned = find_banned_fragment(caption)
+        if banned:
+            await message.answer(
+                f"🚫 Подпись к фото содержит запрещенное слово: <code>{escape(banned)}</code>.\n"
+                "Удалите его и отправьте фото снова.",
+                parse_mode="HTML"
+            )
+            return
+        media_items.append({"type": "photo", "id": message.photo[-1].file_id})
+        if caption:
+            text_value = f"{text_value}\n{caption}".strip() if text_value else caption
+        await state.update_data(text=text_value, media_items=media_items)
+        await message.answer(f"Фото добавлено ({len(media_items)}/{MAX_MEDIA_COUNT}).")
+    elif message.video:
+        if len(media_items) >= MAX_MEDIA_COUNT:
+            await message.answer(f"Можно прикрепить максимум {MAX_MEDIA_COUNT} медиа.")
+            return
+        caption = (message.caption or "").strip()
+        banned = find_banned_fragment(caption)
+        if banned:
+            await message.answer(
+                f"🚫 Подпись к видео содержит запрещенное слово: <code>{escape(banned)}</code>.\n"
+                "Удалите его и отправьте видео снова.",
+                parse_mode="HTML"
+            )
+            return
+        media_items.append({"type": "video", "id": message.video.file_id})
+        if caption:
+            text_value = f"{text_value}\n{caption}".strip() if text_value else caption
+        await state.update_data(text=text_value, media_items=media_items)
+        await message.answer(f"Видео добавлено ({len(media_items)}/{MAX_MEDIA_COUNT}).")
 
 @dp.message_handler(state=PostStates.waiting_for_anonymous_choice)
 async def process_anonymous_choice(message: types.Message, state: FSMContext):
@@ -307,25 +434,53 @@ async def process_anonymous_choice(message: types.Message, state: FSMContext):
         message.from_user.first_name
     )
 
+    blocked, reason = is_spam_blocked(message.from_user.id, user[0])
+    if blocked:
+        await message.answer(reason)
+        return
+
+    post_text = (data.get("text") or "").strip()
+    banned = find_banned_fragment(post_text)
+    if banned:
+        await message.answer(
+            f"🚫 В тексте поста есть запрещенное слово: <code>{escape(banned)}</code>.\n"
+            "Исправьте текст перед отправкой.",
+            parse_mode="HTML"
+        )
+        await PostStates.waiting_for_content.set()
+        return
+    media_items = data.get("media_items", [])
+    if len(media_items) > MAX_MEDIA_COUNT:
+        media_items = media_items[:MAX_MEDIA_COUNT]
+
+    media_type = None
+    media_id = None
+    if len(media_items) == 1:
+        media_type = media_items[0]["type"]
+        media_id = media_items[0]["id"]
+    elif len(media_items) > 1:
+        media_type = "album"
+        media_id = json.dumps(media_items, ensure_ascii=False)
+
     # Сохраняем пост
     cursor.execute('''
         INSERT INTO posts (user_id, text, media_type, media_id, is_anonymous)
         VALUES (?, ?, ?, ?, ?)
-    ''', (user[0], data['text'], data.get('media_type'), data.get('media_id'), is_anonymous))
+    ''', (user[0], post_text, media_type, media_id, is_anonymous))
     conn.commit()
     post_id = cursor.lastrowid
+    mark_submit_time(message.from_user.id)
 
     # Формируем сообщение для админ-чата с HTML-форматированием
     admin_text = f"<b>📝 Новый пост #{post_id}</b>\n\n"
-    if is_anonymous:
-        admin_text += "<b>👤 Автор:</b> АНОНИМНО\n"
-    else:
-        admin_text += f"<b>👤 Автор:</b> {user[3]}"
-        if user[2]:
-            admin_text += f" (@{user[2]})"
-        admin_text += "\n"
+    admin_text += f"<b>👤 Реальный автор:</b> {escape(user[3] or 'Пользователь')}"
+    if user[2]:
+        admin_text += f" (@{escape(user[2])})"
+    admin_text += f"\n<b>🆔 TG ID:</b> <code>{user[1]}</code>\n"
+    admin_text += f"<b>👁 Для подписчиков:</b> {'Анонимно' if is_anonymous else 'От своего имени'}\n"
     admin_text += f"<b>🔒 Анонимно:</b> {'Да' if is_anonymous else 'Нет'}\n\n"
-    admin_text += f"<b>📄 Текст:</b>\n{data['text']}\n"
+    admin_text += f"<b>📎 Медиа:</b> {len(media_items)} шт.\n\n"
+    admin_text += f"<b>📄 Текст:</b>\n{escape(post_text) if post_text else '—'}\n"
 
     admin_keyboard = InlineKeyboardMarkup(row_width=2)
     admin_keyboard.add(
@@ -334,19 +489,32 @@ async def process_anonymous_choice(message: types.Message, state: FSMContext):
     )
 
     try:
-        if data.get('media_type') == 'photo':
+        if media_type == 'photo':
             admin_msg = await bot.send_photo(
                 ADMIN_CHAT_ID,
-                data['media_id'],
+                media_id,
                 caption=admin_text,
                 reply_markup=admin_keyboard,
                 parse_mode="HTML"
             )
-        elif data.get('media_type') == 'video':
+        elif media_type == 'video':
             admin_msg = await bot.send_video(
                 ADMIN_CHAT_ID,
-                data['media_id'],
+                media_id,
                 caption=admin_text,
+                reply_markup=admin_keyboard,
+                parse_mode="HTML"
+            )
+        elif media_type == 'album':
+            media_list = json.loads(media_id)
+            preview = media_list[0]
+            if preview["type"] == "video":
+                await bot.send_video(ADMIN_CHAT_ID, preview["id"], caption="📎 Превью альбома")
+            else:
+                await bot.send_photo(ADMIN_CHAT_ID, preview["id"], caption="📎 Превью альбома")
+            admin_msg = await bot.send_message(
+                ADMIN_CHAT_ID,
+                admin_text,
                 reply_markup=admin_keyboard,
                 parse_mode="HTML"
             )
@@ -406,6 +574,22 @@ async def approve_post(callback_query: types.CallbackQuery):
             await bot.send_photo(CHANNEL_ID, media_id, caption=formatted_text, parse_mode="HTML")
         elif media_type == 'video' and media_id:
             await bot.send_video(CHANNEL_ID, media_id, caption=formatted_text, parse_mode="HTML")
+        elif media_type == 'album' and media_id:
+            media_items = json.loads(media_id)
+            media_group = []
+            for idx, item in enumerate(media_items[:MAX_MEDIA_COUNT]):
+                if item["type"] == "video":
+                    media = types.InputMediaVideo(media=item["id"])
+                else:
+                    media = types.InputMediaPhoto(media=item["id"])
+                if idx == 0:
+                    media.caption = formatted_text
+                    media.parse_mode = "HTML"
+                media_group.append(media)
+            if media_group:
+                await bot.send_media_group(CHANNEL_ID, media_group)
+            else:
+                await bot.send_message(CHANNEL_ID, formatted_text, parse_mode="HTML")
         else:
             await bot.send_message(CHANNEL_ID, formatted_text, parse_mode="HTML")
 
@@ -642,6 +826,40 @@ async def approved_posts(message: types.Message):
     cursor.execute('SELECT COUNT(*) FROM posts WHERE status = "approved"')
     total = cursor.fetchone()[0]
     await message.answer(f"✅ Сегодня: {today}\nВсего: {total}", parse_mode="HTML")
+
+@dp.message_handler(lambda message: message.text == "💾 Бэкап базы")
+async def admin_database_backup(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    backup_path = None
+    try:
+        backup_path = create_database_backup_file()
+        stamp = datetime.utcnow().strftime("%Y-%m-%d_%H%M%S")
+        filename = f"bot_database_backup_{stamp}.db"
+        admin_name = escape(message.from_user.full_name or "Админ")
+        un = message.from_user.username
+        who_line = admin_name + (f" (@{escape(un)})" if un else "")
+        caption = (
+            f"💾 <b>Резервная копия БД</b>\n"
+            f"🕐 UTC: <code>{escape(stamp)}</code>\n"
+            f"👤 Запросил: {who_line}"
+        )
+        await bot.send_document(
+            ADMIN_CHAT_ID,
+            InputFile(backup_path, filename=filename),
+            caption=caption,
+            parse_mode="HTML",
+        )
+        await message.answer("✅ Бэкап отправлен в админский чат.")
+    except Exception as e:
+        logger.error(f"Ошибка бэкапа БД: {e}\n{traceback.format_exc()}")
+        await message.answer("❌ Не удалось создать или отправить бэкап. Проверьте логи.")
+    finally:
+        if backup_path and os.path.isfile(backup_path):
+            try:
+                os.unlink(backup_path)
+            except OSError:
+                pass
 
 @dp.message_handler(lambda message: message.text == "📊 Статистика")
 async def admin_stats(message: types.Message):
